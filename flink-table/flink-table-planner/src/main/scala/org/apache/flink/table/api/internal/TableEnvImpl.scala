@@ -32,21 +32,23 @@ import org.apache.flink.table.delegation.Parser
 import org.apache.flink.table.expressions._
 import org.apache.flink.table.expressions.resolver.lookups.TableReferenceLookup
 import org.apache.flink.table.factories.{TableFactoryUtil, TableSinkFactoryContextImpl}
-import org.apache.flink.table.functions.{AggregateFunction, ScalarFunction, TableFunction, UserDefinedAggregateFunction, _}
+import org.apache.flink.table.functions.{AggregateFunction, ScalarFunction, TableFunction, ImperativeAggregateFunction, _}
 import org.apache.flink.table.module.{Module, ModuleManager}
 import org.apache.flink.table.operations.ddl._
 import org.apache.flink.table.operations.utils.OperationTreeBuilder
 import org.apache.flink.table.operations.{CatalogQueryOperation, TableSourceQueryOperation, _}
 import org.apache.flink.table.planner.{ParserImpl, PlanningConfigurationBuilder}
-import org.apache.flink.table.sinks.{BatchTableSink, OutputFormatTableSink, OverwritableTableSink, PartitionableTableSink, TableSink, TableSinkUtils}
+import org.apache.flink.table.sinks.{BatchSelectTableSink, BatchTableSink, OutputFormatTableSink, OverwritableTableSink, PartitionableTableSink, TableSink, TableSinkUtils}
 import org.apache.flink.table.sources.TableSource
-import org.apache.flink.table.types.DataType
+import org.apache.flink.table.types.{AbstractDataType, DataType}
 import org.apache.flink.table.util.JavaScalaConversionUtil
+import org.apache.flink.table.utils.PrintUtils
 import org.apache.flink.types.Row
 
 import org.apache.calcite.jdbc.CalciteSchemaBuilder.asRootSchema
 import org.apache.calcite.sql.parser.SqlParser
 import org.apache.calcite.tools.FrameworkConfig
+import org.apache.commons.lang3.StringUtils
 
 import _root_.java.lang.{Iterable => JIterable, Long => JLong}
 import _root_.java.util.function.{Function => JFunction, Supplier => JSupplier}
@@ -127,6 +129,8 @@ abstract class TableEnvImpl(
     }
   )
 
+  catalogManager.setCatalogTableSchemaResolver(new CatalogTableSchemaResolver(parser, false))
+
   def getConfig: TableConfig = config
 
   private val UNSUPPORTED_QUERY_IN_SQL_UPDATE_MSG =
@@ -139,7 +143,7 @@ abstract class TableEnvImpl(
       "CREATE TABLE, DROP TABLE, ALTER TABLE, CREATE DATABASE, DROP DATABASE, ALTER DATABASE, " +
       "CREATE FUNCTION, DROP FUNCTION, ALTER FUNCTION, USE CATALOG, USE [CATALOG.]DATABASE, " +
       "SHOW CATALOGS, SHOW DATABASES, SHOW TABLES, SHOW FUNCTIONS, CREATE VIEW, DROP VIEW, " +
-      "SHOW VIEWS, INSERT."
+      "SHOW VIEWS, INSERT, DESCRIBE."
 
   private def isStreamingMode: Boolean = this match {
     case _: BatchTableEnvImpl => false
@@ -240,7 +244,7 @@ abstract class TableEnvImpl(
     */
   private[flink] def registerAggregateFunctionInternal[T: TypeInformation, ACC: TypeInformation](
       name: String,
-      function: UserDefinedAggregateFunction[T, ACC])
+      function: ImperativeAggregateFunction[T, ACC])
     : Unit = {
     val resultTypeInfo: TypeInformation[T] = UserDefinedFunctionHelper
       .getReturnTypeOfAggregateFunction(
@@ -320,44 +324,6 @@ abstract class TableEnvImpl(
       false)
   }
 
-  override def registerTableSource(name: String, tableSource: TableSource[_]): Unit = {
-    validateTableSource(tableSource)
-    registerTableSourceInternal(name, tableSource)
-  }
-
-  override def registerTableSink(
-    name: String,
-    fieldNames: Array[String],
-    fieldTypes: Array[TypeInformation[_]],
-    tableSink: TableSink[_]): Unit = {
-
-    if (fieldNames == null) {
-      throw new TableException("fieldNames must not be null.")
-    }
-    if (fieldTypes == null) {
-      throw new TableException("fieldTypes must not be null.")
-    }
-    if (fieldNames.length == 0) {
-      throw new TableException("fieldNames must not be empty.")
-    }
-    if (fieldNames.length != fieldTypes.length) {
-      throw new TableException("Same number of field names and types required.")
-    }
-
-    val configuredSink = tableSink.configure(fieldNames, fieldTypes)
-    registerTableSinkInternal(name, configuredSink)
-  }
-
-  override def registerTableSink(name: String, configuredSink: TableSink[_]): Unit = {
-    // validate
-    if (configuredSink.getTableSchema.getFieldNames.length == 0) {
-      throw new TableException("Field names must not be empty.")
-    }
-
-    validateTableSink(configuredSink)
-    registerTableSinkInternal(name, configuredSink)
-  }
-
   override def fromTableSource(source: TableSource[_]): Table = {
     createTable(new TableSourceQueryOperation(source, isBatchTable))
   }
@@ -380,10 +346,11 @@ abstract class TableEnvImpl(
     */
   protected def validateTableSink(tableSink: TableSink[_]): Unit
 
-  private def registerTableSourceInternal(
+  override def registerTableSourceInternal(
       name: String,
       tableSource: TableSource[_])
     : Unit = {
+    validateTableSource(tableSource)
     val unresolvedIdentifier = UnresolvedIdentifier.of(name)
     val objectIdentifier = catalogManager.qualifyIdentifier(unresolvedIdentifier)
     // check if a table (source or sink) is registered
@@ -415,10 +382,16 @@ abstract class TableEnvImpl(
     }
   }
 
-  private def registerTableSinkInternal(
+  override def registerTableSinkInternal(
       name: String,
       tableSink: TableSink[_])
     : Unit = {
+    // validate
+    if (tableSink.getTableSchema.getFieldNames.length == 0) {
+      throw new TableException("Field names must not be empty.")
+    }
+
+    validateTableSink(tableSink)
     val unresolvedIdentifier = UnresolvedIdentifier.of(name)
     val objectIdentifier = catalogManager.qualifyIdentifier(unresolvedIdentifier)
     // check if a table (source or sink) is registered
@@ -473,7 +446,7 @@ abstract class TableEnvImpl(
     val objectIdentifier: ObjectIdentifier = catalogManager.qualifyIdentifier(identifier)
 
     JavaScalaConversionUtil.toScala(catalogManager.getTable(objectIdentifier))
-      .map(t => new CatalogQueryOperation(objectIdentifier, t.getTable.getSchema))
+      .map(t => new CatalogQueryOperation(objectIdentifier, t.getResolvedSchema))
   }
 
   override def listModules(): Array[String] = {
@@ -575,11 +548,64 @@ abstract class TableEnvImpl(
     executeOperation(operations.get(0))
   }
 
+  override def createStatementSet = new StatementSetImpl(this)
+
   override def executeInternal(operations: JList[ModifyOperation]): TableResult = {
-    if (operations.size() != 1) {
-      throw new TableException("Only one ModifyOperation is supported now.");
+    val dataSinks = operations.map {
+      case catalogSinkModifyOperation: CatalogSinkModifyOperation =>
+        writeToSinkAndTranslate(
+          catalogSinkModifyOperation.getChild,
+          InsertOptions(
+            catalogSinkModifyOperation.getDynamicOptions,
+            catalogSinkModifyOperation.isOverwrite),
+          catalogSinkModifyOperation.getTableIdentifier)
+      case o =>
+        throw new TableException("Unsupported operation: " + o)
     }
-    executeOperation(operations.get(0))
+
+    val sinkIdentifierNames = extractSinkIdentifierNames(operations)
+    val jobName = "insert-into_" + String.join(",", sinkIdentifierNames)
+    try {
+      val jobClient = execute(dataSinks, jobName)
+      val builder = TableSchema.builder()
+      val affectedRowCounts = new Array[JLong](operations.size())
+      operations.indices.foreach { idx =>
+        // use sink identifier name as field name
+        builder.field(sinkIdentifierNames(idx), DataTypes.BIGINT())
+        affectedRowCounts(idx) = -1L
+      }
+      TableResultImpl.builder()
+        .jobClient(jobClient)
+        .resultKind(ResultKind.SUCCESS_WITH_CONTENT)
+        .tableSchema(builder.build())
+        .data(JCollections.singletonList(Row.of(affectedRowCounts: _*)))
+        .build()
+    } catch {
+      case e: Exception =>
+        throw new TableException("Failed to execute sql", e);
+    }
+  }
+
+  override def executeInternal(operation: QueryOperation): TableResult = {
+    val tableSchema = operation.getTableSchema
+    val tableSink = new BatchSelectTableSink(tableSchema)
+    val dataSink = writeToSinkAndTranslate(operation, tableSink)
+    try {
+      val jobClient = execute(JCollections.singletonList(dataSink), "collect")
+      val selectResultProvider = tableSink.getSelectResultProvider
+      selectResultProvider.setJobClient(jobClient)
+      TableResultImpl.builder
+        .jobClient(jobClient)
+        .resultKind(ResultKind.SUCCESS_WITH_CONTENT)
+        .tableSchema(tableSchema)
+        .data(selectResultProvider.getResultIterator)
+        .setPrintStyle(
+          PrintStyle.tableau(PrintUtils.MAX_COLUMN_WIDTH, PrintUtils.NULL_COLUMN, true, false))
+        .build
+    } catch {
+      case e: Exception =>
+        throw new TableException("Failed to execute sql", e)
+    }
   }
 
   override def sqlUpdate(stmt: String): Unit = {
@@ -610,20 +636,7 @@ abstract class TableEnvImpl(
   private def executeOperation(operation: Operation): TableResult = {
     operation match {
       case catalogSinkModifyOperation: CatalogSinkModifyOperation =>
-        val dataSink = writeToSinkAndTranslate(
-          catalogSinkModifyOperation.getChild,
-          InsertOptions(
-            catalogSinkModifyOperation.getDynamicOptions,
-            catalogSinkModifyOperation.isOverwrite),
-          catalogSinkModifyOperation.getTableIdentifier)
-        val jobName = extractJobName(catalogSinkModifyOperation)
-        val jobClient = execute(JCollections.singletonList(dataSink), jobName)
-        TableResultImpl.builder()
-          .jobClient(jobClient)
-          .resultKind(ResultKind.SUCCESS_WITH_CONTENT)
-          .tableSchema(TableSchema.builder().field("affected_rowcount", DataTypes.BIGINT()).build())
-          .data(JCollections.singletonList(Row.of(JLong.valueOf(-1L))))
-          .build()
+        executeInternal(JCollections.singletonList[ModifyOperation](catalogSinkModifyOperation))
       case createTableOperation: CreateTableOperation =>
         if (createTableOperation.isTemporary) {
           catalogManager.createTemporaryTable(
@@ -729,13 +742,17 @@ abstract class TableEnvImpl(
         catalogManager.setCurrentDatabase(useDatabaseOperation.getDatabaseName)
         TableResultImpl.TABLE_RESULT_OK
       case _: ShowCatalogsOperation =>
-        buildShowResult(listCatalogs())
+        buildShowResult("catalog name", listCatalogs())
+      case _: ShowCurrentCatalogOperation =>
+        buildShowResult("current catalog name", Array(catalogManager.getCurrentCatalog))
       case _: ShowDatabasesOperation =>
-        buildShowResult(listDatabases())
+        buildShowResult("database name", listDatabases())
+      case _: ShowCurrentDatabaseOperation =>
+        buildShowResult("current database name", Array(catalogManager.getCurrentDatabase))
       case _: ShowTablesOperation =>
-        buildShowResult(listTables())
+        buildShowResult("table name", listTables())
       case _: ShowFunctionsOperation =>
-        buildShowResult(listFunctions())
+        buildShowResult("function name", listFunctions())
       case createViewOperation: CreateViewOperation =>
         if (createViewOperation.isTemporary) {
           catalogManager.createTemporaryTable(
@@ -755,31 +772,84 @@ abstract class TableEnvImpl(
             dropViewOperation.getViewIdentifier,
             dropViewOperation.isIfExists)
         } else {
-          catalogManager.dropTable(
+          catalogManager.dropView(
             dropViewOperation.getViewIdentifier,
             dropViewOperation.isIfExists)
         }
         TableResultImpl.TABLE_RESULT_OK
       case _: ShowViewsOperation =>
-        buildShowResult(listViews())
+        buildShowResult("view name", listViews())
       case explainOperation: ExplainOperation =>
         val explanation = explainInternal(JCollections.singletonList(explainOperation.getChild))
         TableResultImpl.builder.
           resultKind(ResultKind.SUCCESS_WITH_CONTENT)
           .tableSchema(TableSchema.builder.field("result", DataTypes.STRING).build)
           .data(JCollections.singletonList(Row.of(explanation)))
-          .setPrintStyle(PrintStyle.RAW_CONTENT)
+          .setPrintStyle(PrintStyle.rawContent())
           .build
+      case descOperation: DescribeTableOperation =>
+        val result = catalogManager.getTable(descOperation.getSqlIdentifier)
+        if (result.isPresent) {
+          buildDescribeResult(result.get.getTable.getSchema)
+        } else {
+          throw new ValidationException(String.format(
+            "Table or view with identifier '%s' doesn't exist",
+            descOperation.getSqlIdentifier.asSummaryString()))
+        }
+      case queryOperation: QueryOperation =>
+        executeInternal(queryOperation)
 
-      case _ => throw new TableException(UNSUPPORTED_QUERY_IN_EXECUTE_SQL_MSG)
+      case _ =>
+        throw new TableException(UNSUPPORTED_QUERY_IN_EXECUTE_SQL_MSG)
     }
   }
 
-  private def buildShowResult(objects: Array[String]): TableResult = {
+  private def buildShowResult(columnName: String, objects: Array[String]): TableResult = {
+    val rows = Array.ofDim[Object](objects.length, 1)
+    objects.zipWithIndex.foreach {
+      case (obj, i) => rows(i)(0) = obj
+    }
+    buildResult(Array(columnName), Array(DataTypes.STRING), rows)
+  }
+
+  private def buildDescribeResult(schema: TableSchema): TableResult = {
+    val fieldToWatermark =
+      schema
+        .getWatermarkSpecs
+        .map(w => (w.getRowtimeAttribute, w.getWatermarkExpr)).toMap
+    val fieldToPrimaryKey = new JHashMap[String, String]()
+    if (schema.getPrimaryKey.isPresent) {
+      val columns = schema.getPrimaryKey.get.getColumns.asScala
+      columns.foreach(c => fieldToPrimaryKey.put(c, s"PRI(${columns.mkString(", ")})"))
+    }
+    val data = Array.ofDim[Object](schema.getFieldCount, 6)
+    schema.getTableColumns.asScala.zipWithIndex.foreach {
+      case (c, i) => {
+        val logicalType = c.getType.getLogicalType
+        data(i)(0) = c.getName
+        data(i)(1) = StringUtils.removeEnd(logicalType.toString, " NOT NULL")
+        data(i)(2) = Boolean.box(logicalType.isNullable)
+        data(i)(3) = fieldToPrimaryKey.getOrDefault(c.getName, null)
+        data(i)(4) = c.getExpr.orElse(null)
+        data(i)(5) = fieldToWatermark.getOrDefault(c.getName, null)
+      }
+    }
+    buildResult(
+      Array("name", "type", "null", "key", "computed column", "watermark"),
+      Array(DataTypes.STRING, DataTypes.STRING, DataTypes.BOOLEAN, DataTypes.STRING,
+        DataTypes.STRING, DataTypes.STRING),
+      data)
+  }
+
+  private def buildResult(
+      headers: Array[String],
+      types: Array[DataType],
+      rows: Array[Array[Object]]): TableResult = {
     TableResultImpl.builder()
       .resultKind(ResultKind.SUCCESS_WITH_CONTENT)
-      .tableSchema(TableSchema.builder().field("result", DataTypes.STRING()).build())
-      .data(objects.map(Row.of(_)).toList)
+      .tableSchema(
+        TableSchema.builder().fields(headers, types).build())
+      .data(rows.map(Row.of(_:_*)).toList)
       .build()
   }
 
@@ -807,14 +877,32 @@ abstract class TableEnvImpl(
       }))
   }
 
-  private def extractJobName(operation: Operation): String = {
-    val tableName = operation match {
+  /**
+    * extract sink identifier names from [[ModifyOperation]]s.
+    *
+    * <p>If there are multiple ModifyOperations have same name,
+    * an index suffix will be added at the end of the name to ensure each name is unique.
+    */
+  private def extractSinkIdentifierNames(operations: JList[ModifyOperation]): JList[String] = {
+    val tableNameToCount = new JHashMap[String, Int]()
+    val tableNames = operations.map {
       case catalogSinkModifyOperation: CatalogSinkModifyOperation =>
-        catalogSinkModifyOperation.getTableIdentifier.toString
-      case _ =>
-        throw new UnsupportedOperationException("Unsupported operation: " + operation)
+        val fullName = catalogSinkModifyOperation.getTableIdentifier.asSummaryString()
+        tableNameToCount.put(fullName, tableNameToCount.getOrDefault(fullName, 0) + 1)
+        fullName
+      case o =>
+        throw new UnsupportedOperationException("Unsupported operation: " + o)
     }
-    "insert_into_" + tableName
+    val tableNameToIndex = new JHashMap[String, Int]()
+    tableNames.map { tableName =>
+      if (tableNameToCount.get(tableName) == 1) {
+        tableName
+      } else {
+        val index = tableNameToIndex.getOrDefault(tableName, 0) + 1
+        tableNameToIndex.put(tableName, index)
+        tableName + "_" + index
+      }
+    }
   }
 
   /**
@@ -1153,8 +1241,9 @@ abstract class TableEnvImpl(
     createTable(operationTreeBuilder.values(values: _*))
   }
 
-  override def fromValues(rowType: DataType, values: Expression*): Table = {
-    createTable(operationTreeBuilder.values(rowType, values: _*))
+  override def fromValues(rowType: AbstractDataType[_], values: Expression*): Table = {
+    val resolvedDataType = catalogManager.getDataTypeFactory.createDataType(rowType)
+    createTable(operationTreeBuilder.values(resolvedDataType, values: _*))
   }
 
   override def fromValues(values: JIterable[_]): Table = {
@@ -1164,7 +1253,7 @@ abstract class TableEnvImpl(
     fromValues(exprs: _*)
   }
 
-  override def fromValues(rowType: DataType, values: JIterable[_]): Table = {
+  override def fromValues(rowType: AbstractDataType[_], values: JIterable[_]): Table = {
     val exprs = values.asScala
       .map(ApiExpressionUtils.objectToExpression)
       .toArray

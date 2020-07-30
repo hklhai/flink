@@ -17,6 +17,7 @@
  */
 
 package org.apache.flink.table.planner
+
 import org.apache.flink.annotation.VisibleForTesting
 import org.apache.flink.api.dag.Transformation
 import org.apache.flink.streaming.api.datastream.DataStream
@@ -186,6 +187,11 @@ class StreamPlanner(
     modifyOperation match {
       case s: UnregisteredSinkModifyOperation[_] =>
         writeToSink(s.getChild, s.getSink, "UnregisteredSink")
+
+      case s: SelectSinkOperation =>
+        val sink = new StreamSelectTableSink(s.getChild.getTableSchema)
+        s.setSelectResultProvider(sink.getSelectResultProvider)
+        writeToSink(s.getChild, sink, "collect")
 
       case catalogSink: CatalogSinkModifyOperation =>
         getTableSink(catalogSink.getTableIdentifier)

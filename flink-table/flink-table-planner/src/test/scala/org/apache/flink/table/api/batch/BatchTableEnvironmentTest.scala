@@ -19,15 +19,14 @@
 package org.apache.flink.table.api.batch
 
 import org.apache.flink.api.scala._
-import org.apache.flink.table.api.scala._
-import org.apache.flink.table.api.{ResultKind, TableException}
+import org.apache.flink.table.api._
+import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.catalog.{GenericInMemoryCatalog, ObjectPath}
 import org.apache.flink.table.runtime.stream.sql.FunctionITCase.{SimpleScalarFunction, TestUDF}
 import org.apache.flink.table.utils.TableTestBase
 import org.apache.flink.table.utils.TableTestUtil.{readFromResource, replaceStageId, _}
 import org.apache.flink.types.Row
 
-import org.hamcrest.Matchers.containsString
 import org.junit.Assert.{assertEquals, assertFalse, assertTrue, fail}
 import org.junit.Test
 
@@ -177,28 +176,30 @@ class BatchTableEnvironmentTest extends TableTestBase {
       .functionExists(ObjectPath.fromString("default_database.f1")))
 
     val tableResult4 = util.tableEnv.executeSql(
-      s"CREATE TEMPORARY SYSTEM FUNCTION default_database.f2 AS '$funcName'")
+      s"CREATE TEMPORARY SYSTEM FUNCTION f2 AS '$funcName'")
     assertEquals(ResultKind.SUCCESS, tableResult4.getResultKind)
     assertTrue(util.tableEnv.listUserDefinedFunctions().contains("f2"))
 
     val tableResult5 = util.tableEnv.executeSql(
-      "DROP TEMPORARY SYSTEM FUNCTION default_database.f2")
+      "DROP TEMPORARY SYSTEM FUNCTION f2")
     assertEquals(ResultKind.SUCCESS, tableResult5.getResultKind)
     assertFalse(util.tableEnv.listUserDefinedFunctions().contains("f2"))
   }
 
   @Test
-  def testExecuteSqlWithUseCatalog(): Unit = {
+  def testExecuteSqlWithUseCatalogAndShowCurrentCatalog(): Unit = {
     val util = batchTestUtil()
     util.tableEnv.registerCatalog("my_catalog", new GenericInMemoryCatalog("my_catalog"))
     assertEquals("default_catalog", util.tableEnv.getCurrentCatalog)
     val tableResult2 = util.tableEnv.executeSql("USE CATALOG my_catalog")
     assertEquals(ResultKind.SUCCESS, tableResult2.getResultKind)
     assertEquals("my_catalog", util.tableEnv.getCurrentCatalog)
+    val tableResult3 = util.tableEnv.executeSql("SHOW CURRENT CATALOG")
+    assertEquals("my_catalog", tableResult3.collect().next().toString)
   }
 
   @Test
-  def testExecuteSqlWithUseDatabase(): Unit = {
+  def testExecuteSqlWithUseDatabaseAndShowCurrentDatabase(): Unit = {
     val util = batchTestUtil()
     val tableResult1 = util.tableEnv.executeSql("CREATE DATABASE db1 COMMENT 'db1_comment'")
     assertEquals(ResultKind.SUCCESS, tableResult1.getResultKind)
@@ -209,6 +210,9 @@ class BatchTableEnvironmentTest extends TableTestBase {
     val tableResult2 = util.tableEnv.executeSql("USE db1")
     assertEquals(ResultKind.SUCCESS, tableResult2.getResultKind)
     assertEquals("db1", util.tableEnv.getCurrentDatabase)
+
+    val tableResult3 = util.tableEnv.executeSql("SHOW CURRENT DATABASE")
+    assertEquals("db1", tableResult3.collect().next().toString)
   }
 
   @Test
@@ -217,6 +221,9 @@ class BatchTableEnvironmentTest extends TableTestBase {
     testUtil.tableEnv.registerCatalog("my_catalog", new GenericInMemoryCatalog("my_catalog"))
     val tableResult = testUtil.tableEnv.executeSql("SHOW CATALOGS")
     assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult.getResultKind)
+    assertEquals(
+      TableSchema.builder().field("catalog name", DataTypes.STRING()).build(),
+      tableResult.getTableSchema)
     checkData(
       util.Arrays.asList(Row.of("default_catalog"), Row.of("my_catalog")).iterator(),
       tableResult.collect())
@@ -230,6 +237,9 @@ class BatchTableEnvironmentTest extends TableTestBase {
     testUtil.tableEnv.registerCatalog("my_catalog", new GenericInMemoryCatalog("my_catalog"))
     val tableResult2 = testUtil.tableEnv.executeSql("SHOW DATABASES")
     assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult2.getResultKind)
+    assertEquals(
+      TableSchema.builder().field("database name", DataTypes.STRING()).build(),
+      tableResult2.getTableSchema)
     checkData(
       util.Arrays.asList(Row.of("default_database"), Row.of("db1")).iterator(),
       tableResult2.collect())
@@ -254,6 +264,9 @@ class BatchTableEnvironmentTest extends TableTestBase {
 
     val tableResult2 = testUtil.tableEnv.executeSql("SHOW TABLES")
     assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult2.getResultKind)
+    assertEquals(
+      TableSchema.builder().field("table name", DataTypes.STRING()).build(),
+      tableResult2.getTableSchema)
     checkData(
       util.Arrays.asList(Row.of("tbl1")).iterator(),
       tableResult2.collect())
@@ -264,20 +277,12 @@ class BatchTableEnvironmentTest extends TableTestBase {
     val util = batchTestUtil()
     val tableResult = util.tableEnv.executeSql("SHOW FUNCTIONS")
     assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult.getResultKind)
+    assertEquals(
+      TableSchema.builder().field("function name", DataTypes.STRING()).build(),
+      tableResult.getTableSchema)
     checkData(
       util.tableEnv.listFunctions().map(Row.of(_)).toList.asJava.iterator(),
       tableResult.collect())
-  }
-
-  @Test
-  def testExecuteSqlWithUnsupportedStmt(): Unit = {
-    val util = batchTestUtil()
-    util.addTable[(Long, Int, String)]("MyTable", 'a, 'b, 'c)
-
-    thrown.expect(classOf[TableException])
-    thrown.expectMessage(containsString("Unsupported SQL query!"))
-    // TODO supports select later
-    util.tableEnv.executeSql("select * from MyTable")
   }
 
   @Test
@@ -336,6 +341,9 @@ class BatchTableEnvironmentTest extends TableTestBase {
 
     val tableResult4 = util.tableEnv.executeSql("SHOW VIEWS")
     assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult4.getResultKind)
+    assertEquals(
+      TableSchema.builder().field("view name", DataTypes.STRING()).build(),
+      tableResult4.getTableSchema)
     checkData(
       util.tableEnv.listViews().map(Row.of(_)).toList.asJava.iterator(),
       tableResult4.collect())
@@ -536,6 +544,34 @@ class BatchTableEnvironmentTest extends TableTestBase {
       case e =>
         fail("This should not happen, " + e.getMessage)
     }
+  }
+
+  @Test
+  def testExecuteSqlWithDescribe(): Unit = {
+    val testUtil = batchTestUtil()
+    val createTableStmt =
+      """
+        |CREATE TABLE tbl1 (
+        |  a bigint,
+        |  b int,
+        |  c varchar
+        |) with (
+        |  'connector' = 'COLLECTION',
+        |  'is-bounded' = 'false'
+        |)
+      """.stripMargin
+    val tableResult1 = testUtil.tableEnv.executeSql(createTableStmt)
+    assertEquals(ResultKind.SUCCESS, tableResult1.getResultKind)
+
+    val tableResult2 = testUtil.tableEnv.executeSql("DESCRIBE tbl1")
+    assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult2.getResultKind)
+    checkData(
+      java.util.Arrays.asList(
+        Row.of("a", "BIGINT", Boolean.box(true), null, null, null),
+        Row.of("b", "INT", Boolean.box(true), null, null, null),
+        Row.of("c", "STRING", Boolean.box(true), null, null, null)
+      ).iterator(),
+      tableResult2.collect())
   }
 
   private def checkData(expected: util.Iterator[Row], actual: util.Iterator[Row]): Unit = {

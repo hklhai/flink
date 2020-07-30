@@ -18,16 +18,16 @@
 
 package org.apache.flink.table.planner.codegen
 
-import org.apache.flink.api.common.ExecutionConfig
 import org.apache.flink.api.common.functions.{Function, RuntimeContext}
 import org.apache.flink.api.common.typeutils.TypeSerializer
 import org.apache.flink.table.api.TableConfig
 import org.apache.flink.table.data.GenericRowData
+import org.apache.flink.table.data.conversion.DataStructureConverter
 import org.apache.flink.table.functions.{FunctionContext, UserDefinedFunction}
 import org.apache.flink.table.planner.codegen.CodeGenUtils._
 import org.apache.flink.table.planner.codegen.GenerateUtils.generateRecordStatement
 import org.apache.flink.table.runtime.operators.TableStreamOperator
-import org.apache.flink.table.runtime.types.InternalSerializers
+import org.apache.flink.table.runtime.typeutils.InternalSerializers
 import org.apache.flink.table.runtime.util.collections._
 import org.apache.flink.table.types.logical.LogicalTypeRoot._
 import org.apache.flink.table.types.logical._
@@ -109,9 +109,9 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
   private var currentMethodNameForLocalVariables = "DEFAULT"
 
   /**
-   * Flag that indicates whether the generated code is split into several methods.
+   * Flag map that indicates whether the generated code for method is split into several methods.
    */
-  private var isCodeSplit = false
+  private val isCodeSplitMap = mutable.Map[String, Boolean]()
 
   // map of local variable statements. It will be placed in method if method code not excess
   // max code length, otherwise will be placed in member area of the class. The statements
@@ -149,11 +149,12 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
   }
 
   /**
-   * Set the flag [[isCodeSplit]] to be true, which indicates the generated code is split into
-   * several methods.
+   * Set the flag [[isCodeSplitMap]] to be true for methodName, which indicates
+   * the generated code is split into several methods.
+   * @param methodName the method which will be split.
    */
-  def setCodeSplit(): Unit = {
-    isCodeSplit = true
+  def setCodeSplit(methodName: String = currentMethodNameForLocalVariables): Unit = {
+    isCodeSplitMap(methodName) = true
   }
 
   /**
@@ -210,10 +211,14 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
     */
   def reuseMemberCode(): String = {
     val result = reusableMemberStatements.mkString("\n")
-    if (isCodeSplit) {
+    if (isCodeSplitMap.nonEmpty) {
       val localVariableAsMember = reusableLocalVariableStatements.map(
-        statements => statements._2.map("private " + _).mkString("\n")
-      ).mkString("\n")
+        statements => if (isCodeSplitMap.getOrElse(statements._1, false)) {
+          statements._2.map("private " + _).mkString("\n")
+        } else {
+          ""
+        }
+      ).filter(_.length > 0).mkString("\n")
       result + "\n" + localVariableAsMember
     } else {
       result
@@ -224,8 +229,8 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
     * @return code block of statements that will be placed in the member area of the class
     *         if generated code is split or in local variables of method
     */
-  def reuseLocalVariableCode(methodName: String = null): String = {
-    if (isCodeSplit) {
+  def reuseLocalVariableCode(methodName: String = currentMethodNameForLocalVariables): String = {
+    if (isCodeSplitMap.getOrElse(methodName, false)) {
       GeneratedExpression.NO_CODE
     } else if (methodName == null) {
       reusableLocalVariableStatements(currentMethodNameForLocalVariables).mkString("\n")
@@ -375,12 +380,11 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
       clazz: Class[_],
       outRecordTerm: String,
       outRecordWriterTerm: Option[String] = None): Unit = {
-    val statement = generateRecordStatement(t, clazz, outRecordTerm, outRecordWriterTerm)
-    reusableMemberStatements.add(statement)
+    generateRecordStatement(t, clazz, outRecordTerm, outRecordWriterTerm, this)
   }
 
   /**
-    * Adds a reusable null [[org.apache.flink.table.dataformat.GenericRowData]] to the member area.
+    * Adds a reusable null [[GenericRowData]] to the member area.
     */
   def addReusableNullRow(rowTerm: String, arity: Int): Unit = {
     addReusableOutputRecord(
@@ -665,6 +669,33 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
   }
 
   /**
+   * Adds a reusable [[DataStructureConverter]] to the member area of the generated class.
+   *
+   * @param converter converter to be added
+   * @param classLoaderTerm term to access the [[ClassLoader]] for user-defined classes
+   */
+  def addReusableConverter(
+      converter: DataStructureConverter[_, _],
+      classLoaderTerm: String = null)
+    : String = {
+
+    val converterTerm = addReusableObject(converter, "converter")
+
+    val openConverter = if (classLoaderTerm != null) {
+      s"""
+         |$converterTerm.open($classLoaderTerm);
+       """.stripMargin
+    } else {
+      s"""
+         |$converterTerm.open(getRuntimeContext().getUserCodeClassLoader());
+       """.stripMargin
+    }
+    reusableOpenStatements.add(openConverter)
+
+    converterTerm
+  }
+
+  /**
     * Adds a reusable [[TypeSerializer]] to the member area of the generated class.
     *
     * @param t the internal type which used to generate internal type serializer
@@ -678,7 +709,7 @@ class CodeGeneratorContext(val tableConfig: TableConfig) {
 
       case None =>
         val term = newName("typeSerializer")
-        val ser = InternalSerializers.create(t, new ExecutionConfig)
+        val ser = InternalSerializers.create(t)
         addReusableObjectInternal(ser, term, ser.getClass.getCanonicalName)
         reusableTypeSerializers(t) = term
         term

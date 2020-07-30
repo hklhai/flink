@@ -22,7 +22,6 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.table.api.constraints.UniqueConstraint;
 import org.apache.flink.table.types.DataType;
-import org.apache.flink.table.types.FieldsDataType;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -78,7 +77,7 @@ public class TableSchemaTest {
 			schema.getTableColumn(3));
 		assertEquals(Optional.of(DataTypes.STRING()), schema.getFieldDataType("f2"));
 		assertEquals(Optional.of(DataTypes.STRING()), schema.getFieldDataType("f1")
-			.map(r -> ((FieldsDataType) r).getFieldDataTypes().get("q1")));
+			.map(r -> r.getChildren().get(0)));
 		assertFalse(schema.getFieldName(4).isPresent());
 		assertFalse(schema.getFieldType(-1).isPresent());
 		assertFalse(schema.getFieldType("c").isPresent());
@@ -171,7 +170,7 @@ public class TableSchemaTest {
 	public void testDifferentWatermarkStrategyOutputTypes() {
 		List<Tuple2<DataType, String>> testData = new ArrayList<>();
 		testData.add(Tuple2.of(DataTypes.BIGINT(), "but is of type 'BIGINT'"));
-		testData.add(Tuple2.of(DataTypes.STRING(), "but is of type 'VARCHAR(2147483647)'"));
+		testData.add(Tuple2.of(DataTypes.STRING(), "but is of type 'STRING'"));
 		testData.add(Tuple2.of(DataTypes.INT(), "but is of type 'INT'"));
 		testData.add(Tuple2.of(DataTypes.TIMESTAMP(), "PASS"));
 		testData.add(Tuple2.of(DataTypes.TIMESTAMP(0), "PASS"));

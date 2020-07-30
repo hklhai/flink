@@ -595,8 +595,7 @@ public interface Table {
 	 *     }
 	 *   }
 	 *
-	 *   TableFunction<String> split = new MySplitUDTF();
-	 *   table.joinLateral(call(split, $("c")).as("s"))
+	 *   table.joinLateral(call(MySplitUDTF.class, $("c")).as("s"))
 	 *        .select($("a"), $("b"), $("c"), $("s"));
 	 * }
 	 * </pre>
@@ -659,8 +658,7 @@ public interface Table {
 	 *     }
 	 *   }
 	 *
-	 *   TableFunction<String> split = new MySplitUDTF();
-	 *   table.joinLateral(call(split, $("c")).as("s"), $("a").isEqual($("s")))
+	 *   table.joinLateral(call(MySplitUDTF.class, $("c")).as("s"), $("a").isEqual($("s")))
 	 *        .select($("a"), $("b"), $("c"), $("s"));
 	 * }
 	 * </pre>
@@ -725,8 +723,7 @@ public interface Table {
 	 *     }
 	 *   }
 	 *
-	 *   TableFunction<String> split = new MySplitUDTF();
-	 *   table.leftOuterJoinLateral(call(split, $("c")).as("s"))
+	 *   table.leftOuterJoinLateral(call(MySplitUDTF.class, $("c")).as("s"))
 	 *        .select($("a"), $("b"), $("c"), $("s"));
 	 * }
 	 * </pre>
@@ -791,8 +788,7 @@ public interface Table {
 	 *     }
 	 *   }
 	 *
-	 *   TableFunction<String> split = new MySplitUDTF();
-	 *   table.leftOuterJoinLateral(call(split, $("c")).as("s"), $("a").isEqual($("s")))
+	 *   table.leftOuterJoinLateral(call(MySplitUDTF.class, $("c")).as("s"), $("a").isEqual($("s")))
 	 *        .select($("a"), $("b"), $("c"), $("s"));
 	 * }
 	 * </pre>
@@ -937,10 +933,11 @@ public interface Table {
 	Table orderBy(String fields);
 
 	/**
-	 * Sorts the given {@link Table}. Similar to SQL ORDER BY.
-	 * The resulting Table is globally sorted across all parallel partitions.
+	 * Sorts the given {@link Table}. Similar to SQL {@code ORDER BY}.
 	 *
-	 * <p>Scala Example:
+	 * <p>The resulting Table is globally sorted across all parallel partitions.
+	 *
+	 * <p>Java Example:
 	 *
 	 * <pre>
 	 * {@code
@@ -955,16 +952,17 @@ public interface Table {
 	 *   tab.orderBy($"name".desc)
 	 * }
 	 * </pre>
+	 *
+	 * <p>For unbounded tables, this operation requires a sorting on a time attribute or a subsequent
+	 * fetch operation.
 	 */
 	Table orderBy(Expression... fields);
 
 	/**
-	 * Limits a sorted result from an offset position.
-	 * Similar to a SQL OFFSET clause. Offset is technically part of the Order By operator and
-	 * thus must be preceded by it.
+	 * Limits a (possibly sorted) result from an offset position.
 	 *
-	 * {@link Table#offset(int offset)} can be combined with a subsequent
-	 * {@link Table#fetch(int fetch)} call to return n rows after skipping the first o rows.
+	 * <p>This method can be combined with a preceding {@link #orderBy(Expression...)} call for a deterministic
+	 * order and a subsequent {@link #fetch(int)} call to return n rows after skipping the first o rows.
 	 *
 	 * <pre>
 	 * {@code
@@ -975,17 +973,17 @@ public interface Table {
 	 * }
 	 * </pre>
 	 *
+	 * <p>For unbounded tables, this operation requires a subsequent fetch operation.
+	 *
 	 * @param offset number of records to skip
 	 */
 	Table offset(int offset);
 
 	/**
-	 * Limits a sorted result to the first n rows.
-	 * Similar to a SQL FETCH clause. Fetch is technically part of the Order By operator and
-	 * thus must be preceded by it.
+	 * Limits a (possibly sorted) result to the first n rows.
 	 *
-	 * {@link Table#fetch(int fetch)} can be combined with a preceding
-	 * {@link Table#offset(int offset)} call to return n rows after skipping the first o rows.
+	 * <p>This method can be combined with a preceding {@link #orderBy(Expression...)} call for a deterministic
+	 * order and {@link #offset(int)} call to return n rows after skipping the first o rows.
 	 *
 	 * <pre>
 	 * {@code
@@ -1001,6 +999,24 @@ public interface Table {
 	Table fetch(int fetch);
 
 	/**
+	 * Limits a (possibly sorted) result to the first n rows.
+	 *
+	 * <p>This method is a synonym for {@link #fetch(int)}.
+	 */
+	default Table limit(int fetch) {
+		return fetch(fetch);
+	}
+
+	/**
+	 * Limits a (possibly sorted) result to the first n rows from an offset position.
+	 *
+	 * <p>This method is a synonym for {@link #offset(int)} followed by {@link #fetch(int)}.
+	 */
+	default Table limit(int offset, int fetch) {
+		return offset(offset).fetch(fetch);
+	}
+
+	/**
 	 * Writes the {@link Table} to a {@link TableSink} that was registered under the specified path.
 	 * For the path resolution algorithm see {@link TableEnvironment#useDatabase(String)}.
 	 *
@@ -1012,7 +1028,10 @@ public interface Table {
 	 *
 	 * @param tablePath The path of the registered {@link TableSink} to which the {@link Table} is
 	 *        written.
+	 * @deprecated use {@link #executeInsert(String)} for single sink,
+	 *             use {@link TableEnvironment#createStatementSet()} for multiple sinks.
 	 */
+	@Deprecated
 	void insertInto(String tablePath);
 
 	/**
@@ -1267,8 +1286,7 @@ public interface Table {
 	 *
 	 * <pre>
 	 * {@code
-	 *   ScalarFunction func = new MyMapFunction();
-	 *   tab.map(call(func, $("c")))
+	 *   tab.map(call(MyMapFunction.class, $("c")))
 	 * }
 	 * </pre>
 	 *
@@ -1309,8 +1327,7 @@ public interface Table {
 	 *
 	 * <pre>
 	 * {@code
-	 *   TableFunction func = new MyFlatMapFunction();
-	 *   tab.flatMap(call(func, $("c")))
+	 *   tab.flatMap(call(MyFlatMapFunction.class, $("c")))
 	 * }
 	 * </pre>
 	 *
@@ -1354,8 +1371,7 @@ public interface Table {
 	 *
 	 * <pre>
 	 * {@code
-	 *   AggregateFunction aggFunc = new MyAggregateFunction();
-	 *   tab.aggregate(call(aggFunc, $("a"), $("b")).as("f0", "f1", "f2"))
+	 *   tab.aggregate(call(MyAggregateFunction.class, $("a"), $("b")).as("f0", "f1", "f2"))
 	 *     .select($("f0"), $("f1"));
 	 * }
 	 * </pre>
@@ -1399,8 +1415,7 @@ public interface Table {
 	 *
 	 * <pre>
 	 * {@code
-	 *   TableAggregateFunction tableAggFunc = new MyTableAggregateFunction();
-	 *   tab.flatAggregate(call(tableAggFunc, $("a"), $("b")).as("x", "y", "z"))
+	 *   tab.flatAggregate(call(MyTableAggregateFunction.class, $("a"), $("b")).as("x", "y", "z"))
 	 *     .select($("x"), $("y"), $("z"));
 	 * }
 	 * </pre>
@@ -1475,11 +1490,24 @@ public interface Table {
 	TableResult executeInsert(String tablePath, boolean overwrite);
 
 	/**
+	 * Collects the contents of the current table local client.
+	 *
+	 *  <pre>
+	 * {@code
+	 *   Table table = tableEnv.fromQuery("select * from MyTable");
+	 *   TableResult tableResult = table.execute();
+	 *   tableResult...
+	 * }
+	 * </pre>
+	 */
+	TableResult execute();
+
+	/**
 	 * Returns the AST of this table and the execution plan to compute
 	 * the result of this table.
 	 *
 	 * @param extraDetails The extra explain details which the explain result should include,
-	 *   e.g. estimated cost, change log trait for streaming
+	 *   e.g. estimated cost, changelog mode for streaming
 	 * @return AST and the execution plan.
 	 */
 	String explain(ExplainDetail... extraDetails);

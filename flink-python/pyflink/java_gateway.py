@@ -22,11 +22,13 @@ import shutil
 import struct
 import tempfile
 import time
+from logging import WARN
 from threading import RLock
 
-from py4j.java_gateway import java_import, JavaGateway, GatewayParameters, CallbackServerParameters
+from py4j.java_gateway import (java_import, logger, JavaGateway, GatewayParameters,
+                               CallbackServerParameters)
 from pyflink.pyflink_gateway_server import launch_gateway_server_process
-from pyflink.util.exceptions import install_exception_handler
+from pyflink.util.exceptions import install_exception_handler, install_py4j_hooks
 
 _gateway = None
 _lock = RLock()
@@ -46,21 +48,28 @@ def get_gateway():
     global _lock
     with _lock:
         if _gateway is None:
+            # Set the level to WARN to mute the noisy INFO level logs
+            logger.level = WARN
             # if Java Gateway is already running
             if 'PYFLINK_GATEWAY_PORT' in os.environ:
                 gateway_port = int(os.environ['PYFLINK_GATEWAY_PORT'])
-                callback_port = int(os.environ['PYFLINK_CALLBACK_PORT'])
                 gateway_param = GatewayParameters(port=gateway_port, auto_convert=True)
                 _gateway = JavaGateway(
                     gateway_parameters=gateway_param,
                     callback_server_parameters=CallbackServerParameters(
-                        port=callback_port, daemonize=True, daemonize_connections=True))
+                        port=0, daemonize=True, daemonize_connections=True))
             else:
                 _gateway = launch_gateway()
 
+            callback_server = _gateway.get_callback_server()
+            callback_server_listening_address = callback_server.get_listening_address()
+            callback_server_listening_port = callback_server.get_listening_port()
+            _gateway.jvm.org.apache.flink.client.python.PythonEnvUtils.resetCallbackClient(
+                callback_server_listening_address, callback_server_listening_port)
             # import the flink view
             import_flink_view(_gateway)
             install_exception_handler()
+            install_py4j_hooks()
             _gateway.entry_point.put("PythonFunctionFactory", PythonFunctionFactory())
             _gateway.entry_point.put("Watchdog", Watchdog())
     return _gateway
@@ -102,7 +111,6 @@ def launch_gateway():
 
         with open(conn_info_file, "rb") as info:
             gateway_port = struct.unpack("!I", info.read(4))[0]
-            callback_port = struct.unpack("!I", info.read(4))[0]
     finally:
         shutil.rmtree(conn_info_dir)
 
@@ -110,7 +118,7 @@ def launch_gateway():
     gateway = JavaGateway(
         gateway_parameters=GatewayParameters(port=gateway_port, auto_convert=True),
         callback_server_parameters=CallbackServerParameters(
-            port=callback_port, daemonize=True, daemonize_connections=True))
+            port=0, daemonize=True, daemonize_connections=True))
 
     return gateway
 
@@ -123,6 +131,7 @@ def import_flink_view(gateway):
     # Import the classes used by PyFlink
     java_import(gateway.jvm, "org.apache.flink.table.api.*")
     java_import(gateway.jvm, "org.apache.flink.table.api.java.*")
+    java_import(gateway.jvm, "org.apache.flink.table.api.bridge.java.*")
     java_import(gateway.jvm, "org.apache.flink.table.api.dataview.*")
     java_import(gateway.jvm, "org.apache.flink.table.catalog.*")
     java_import(gateway.jvm, "org.apache.flink.table.descriptors.*")

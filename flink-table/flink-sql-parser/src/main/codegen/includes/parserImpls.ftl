@@ -16,6 +16,36 @@
 -->
 
 /**
+ * Parses a "IF EXISTS" option, default is false.
+ */
+boolean IfExistsOpt() :
+{
+}
+{
+    (
+        LOOKAHEAD(2)
+        <IF> <EXISTS> { return true; }
+    |
+        { return false; }
+    )
+}
+
+/**
+ * Parses a "IF NOT EXISTS" option, default is false.
+ */
+boolean IfNotExistsOpt() :
+{
+}
+{
+    (
+        LOOKAHEAD(3)
+        <IF> <NOT> <EXISTS> { return true; }
+    |
+        { return false; }
+    )
+}
+
+/**
 * Parse a "Show Catalogs" metadata query command.
 */
 SqlShowCatalogs SqlShowCatalogs() :
@@ -26,6 +56,21 @@ SqlShowCatalogs SqlShowCatalogs() :
     {
         return new SqlShowCatalogs(getPos());
     }
+}
+
+SqlCall SqlShowCurrentCatalogOrDatabase() :
+{
+}
+{
+    <SHOW> <CURRENT> ( <CATALOG>
+        {
+            return new SqlShowCurrentCatalog(getPos());
+        }
+    | <DATABASE>
+        {
+            return new SqlShowCurrentDatabase(getPos());
+        }
+    )
 }
 
 SqlDescribeCatalog SqlDescribeCatalog() :
@@ -79,6 +124,23 @@ SqlCreate SqlCreateCatalog(Span s, boolean replace) :
     }
 }
 
+SqlDrop SqlDropCatalog(Span s, boolean replace) :
+{
+    SqlIdentifier catalogName = null;
+    boolean ifExists = false;
+}
+{
+    <CATALOG>
+
+    ifExists = IfExistsOpt()
+
+    catalogName = CompoundIdentifier()
+
+    {
+        return new SqlDropCatalog(s.pos(), catalogName, ifExists);
+    }
+}
+
 /**
 * Parse a "Show DATABASES" metadata query command.
 */
@@ -121,10 +183,9 @@ SqlCreate SqlCreateDatabase(Span s, boolean replace) :
 }
 {
     <DATABASE> { startPos = getPos(); }
-    [
-        LOOKAHEAD(3)
-        <IF> <NOT> <EXISTS> { ifNotExists = true; }
-    ]
+
+    ifNotExists = IfNotExistsOpt()
+
     databaseName = CompoundIdentifier()
     [ <COMMENT> <QUOTED_STRING>
         {
@@ -172,17 +233,13 @@ SqlDrop SqlDropDatabase(Span s, boolean replace) :
 {
     <DATABASE>
 
-    (
-        <IF> <EXISTS> { ifExists = true; }
-    |
-        { ifExists = false; }
-    )
+    ifExists = IfExistsOpt()
 
     databaseName = CompoundIdentifier()
     [
-                <RESTRICT> { cascade = false; }
-        |
-                <CASCADE>  { cascade = true; }
+        <RESTRICT> { cascade = false; }
+    |
+        <CASCADE>  { cascade = true; }
     ]
 
     {
@@ -215,18 +272,16 @@ SqlCreate SqlCreateFunction(Span s, boolean replace, boolean isTemporary) :
     boolean isSystemFunction = false;
 }
 {
-    [
-        <SYSTEM> {isSystemFunction = true;}
-    ]
-
-    <FUNCTION>
-
-    [
-        LOOKAHEAD(3)
-        <IF> <NOT> <EXISTS> { ifNotExists = true; }
-    ]
-
-    functionIdentifier = CompoundIdentifier()
+    (
+        <SYSTEM> <FUNCTION>
+        ifNotExists = IfNotExistsOpt()
+        functionIdentifier = SimpleIdentifier()
+        {  isSystemFunction = true; }
+    |
+        <FUNCTION>
+        ifNotExists = IfNotExistsOpt()
+        functionIdentifier = CompoundIdentifier()
+    )
 
     <AS> <QUOTED_STRING> {
         String p = SqlParserUtil.parseString(token.image);
@@ -260,7 +315,7 @@ SqlDrop SqlDropFunction(Span s, boolean replace, boolean isTemporary) :
 
     <FUNCTION>
 
-    [ LOOKAHEAD(2) <IF> <EXISTS> { ifExists = true; } ]
+    ifExists = IfExistsOpt()
 
     functionIdentifier = CompoundIdentifier()
 
@@ -288,7 +343,7 @@ SqlAlterFunction SqlAlterFunction() :
 
     <FUNCTION> { startPos = getPos(); }
 
-    [ LOOKAHEAD(2) <IF> <EXISTS> { ifExists = true; } ]
+    ifExists = IfExistsOpt()
 
     functionIdentifier = CompoundIdentifier()
 
@@ -775,6 +830,8 @@ SqlTableLikeOption SqlTableLikeOption():
         <OPTIONS> { featureOption = FeatureOption.OPTIONS;}
     |
         <PARTITIONS> { featureOption = FeatureOption.PARTITIONS;}
+    |
+        <WATERMARKS> { featureOption = FeatureOption.WATERMARKS;}
     )
 
     {
@@ -790,11 +847,7 @@ SqlDrop SqlDropTable(Span s, boolean replace, boolean isTemporary) :
 {
     <TABLE>
 
-    (
-        <IF> <EXISTS> { ifExists = true; }
-    |
-        { ifExists = false; }
-    )
+    ifExists = IfExistsOpt()
 
     tableName = CompoundIdentifier()
 
@@ -913,10 +966,8 @@ SqlCreate SqlCreateView(Span s, boolean replace, boolean isTemporary) : {
 {
     <VIEW>
 
-    [
-        LOOKAHEAD(3)
-        <IF> <NOT> <EXISTS> { ifNotExists = true; }
-    ]
+    ifNotExists = IfNotExistsOpt()
+
     viewName = CompoundIdentifier()
     [
         fieldList = ParenthesizedSimpleIdentifierList()
@@ -929,7 +980,7 @@ SqlCreate SqlCreateView(Span s, boolean replace, boolean isTemporary) : {
     <AS>
     query = OrderedQueryOrExpr(ExprContext.ACCEPT_QUERY)
     {
-        return new SqlCreateView(s.pos(), viewName, fieldList, query, replace, isTemporary, ifNotExists, comment);
+        return new SqlCreateView(s.pos(), viewName, fieldList, query, replace, isTemporary, ifNotExists, comment, null);
     }
 }
 
@@ -941,11 +992,8 @@ SqlDrop SqlDropView(Span s, boolean replace, boolean isTemporary) :
 {
     <VIEW>
 
-    (
-        <IF> <EXISTS> { ifExists = true; }
-    |
-        { ifExists = false; }
-    )
+    ifExists = IfExistsOpt()
+
     viewName = CompoundIdentifier()
     {
         return new SqlDropView(s.pos(), viewName, ifExists, isTemporary);
@@ -1300,6 +1348,8 @@ SqlDrop SqlDropExtended(Span s, boolean replace) :
         <TEMPORARY> { isTemporary = true; }
     ]
     (
+        drop = SqlDropCatalog(s, replace)
+        |
         drop = SqlDropTable(s, replace, isTemporary)
         |
         drop = SqlDropView(s, replace, isTemporary)

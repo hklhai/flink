@@ -45,6 +45,7 @@ import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.JobInformation;
 import org.apache.flink.runtime.executiongraph.PartitionInfo;
 import org.apache.flink.runtime.executiongraph.TaskInformation;
+import org.apache.flink.runtime.externalresource.ExternalResourceInfoProvider;
 import org.apache.flink.runtime.filecache.FileCache;
 import org.apache.flink.runtime.heartbeat.HeartbeatListener;
 import org.apache.flink.runtime.heartbeat.HeartbeatManager;
@@ -202,6 +203,9 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 	/** The state manager for this task, providing state managers per slot. */
 	private final TaskExecutorLocalStateStoresManager localStateStoresManager;
 
+	/** Information provider for external resources. */
+	private final ExternalResourceInfoProvider externalResourceInfoProvider;
+
 	/** The network component in the task manager. */
 	private final ShuffleEnvironment<?, ?> shuffleEnvironment;
 
@@ -227,7 +231,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 	private FileCache fileCache;
 
 	/** The heartbeat manager for job manager in the task manager. */
-	private final HeartbeatManager<AllocatedSlotReport, AccumulatorReport> jobManagerHeartbeatManager;
+	private final HeartbeatManager<AllocatedSlotReport, TaskExecutorToJobManagerHeartbeatPayload> jobManagerHeartbeatManager;
 
 	/** The heartbeat manager for resource manager in the task manager. */
 	private final HeartbeatManager<Void, TaskExecutorHeartbeatPayload> resourceManagerHeartbeatManager;
@@ -257,6 +261,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 			TaskManagerConfiguration taskManagerConfiguration,
 			HighAvailabilityServices haServices,
 			TaskManagerServices taskExecutorServices,
+			ExternalResourceInfoProvider externalResourceInfoProvider,
 			HeartbeatServices heartbeatServices,
 			TaskManagerMetricGroup taskManagerMetricGroup,
 			@Nullable String metricQueryServiceAddress,
@@ -278,6 +283,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 		this.blobCacheService = checkNotNull(blobCacheService);
 		this.metricQueryServiceAddress = metricQueryServiceAddress;
 		this.backPressureSampleService = checkNotNull(backPressureSampleService);
+		this.externalResourceInfoProvider = checkNotNull(externalResourceInfoProvider);
 
 		this.libraryCacheManager = taskExecutorServices.getLibraryCacheManager();
 		this.taskSlotTable = taskExecutorServices.getTaskSlotTable();
@@ -309,7 +315,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 			log);
 	}
 
-	private HeartbeatManager<AllocatedSlotReport, AccumulatorReport> createJobManagerHeartbeatManager(HeartbeatServices heartbeatServices, ResourceID resourceId) {
+	private HeartbeatManager<AllocatedSlotReport, TaskExecutorToJobManagerHeartbeatPayload> createJobManagerHeartbeatManager(HeartbeatServices heartbeatServices, ResourceID resourceId) {
 		return heartbeatServices.createHeartbeatManager(
 			resourceId,
 			new JobManagerHeartbeatListener(),
@@ -620,6 +626,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 				taskExecutorServices.getKvStateService(),
 				taskExecutorServices.getBroadcastVariableManager(),
 				taskExecutorServices.getTaskEventDispatcher(),
+				externalResourceInfoProvider,
 				taskStateManager,
 				taskManagerActions,
 				inputSplitProvider,
@@ -636,7 +643,8 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 
 			taskMetricGroup.gauge(MetricNames.IS_BACKPRESSURED, task::isBackPressured);
 
-			log.info("Received task {}.", task.getTaskInfo().getTaskNameWithSubtasks());
+			log.info("Received task {} ({}), deploy into slot with allocation id {}.",
+				task.getTaskInfo().getTaskNameWithSubtasks(), tdd.getExecutionAttemptId(), tdd.getAllocationId());
 
 			boolean taskAdded;
 
@@ -853,7 +861,28 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 			final String message = "TaskManager received a checkpoint confirmation for unknown task " + executionAttemptID + '.';
 
 			log.debug(message);
-			return FutureUtils.completedExceptionally(new CheckpointException(message, CheckpointFailureReason.TASK_CHECKPOINT_FAILURE));
+			return FutureUtils.completedExceptionally(new CheckpointException(message, CheckpointFailureReason.UNKNOWN_TASK_CHECKPOINT_NOTIFICATION_FAILURE));
+		}
+	}
+
+	@Override
+	public CompletableFuture<Acknowledge> abortCheckpoint(
+			ExecutionAttemptID executionAttemptID,
+			long checkpointId,
+			long checkpointTimestamp) {
+		log.debug("Abort checkpoint {}@{} for {}.", checkpointId, checkpointTimestamp, executionAttemptID);
+
+		final Task task = taskSlotTable.getTask(executionAttemptID);
+
+		if (task != null) {
+			task.notifyCheckpointAborted(checkpointId);
+
+			return CompletableFuture.completedFuture(Acknowledge.get());
+		} else {
+			final String message = "TaskManager received an aborted checkpoint for unknown task " + executionAttemptID + '.';
+
+			log.debug(message);
+			return FutureUtils.completedExceptionally(new CheckpointException(message, CheckpointFailureReason.UNKNOWN_TASK_CHECKPOINT_NOTIFICATION_FAILURE));
 		}
 	}
 
@@ -1351,14 +1380,14 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 			jobMasterGateway);
 
 		// monitor the job manager as heartbeat target
-		jobManagerHeartbeatManager.monitorTarget(jobManagerResourceID, new HeartbeatTarget<AccumulatorReport>() {
+		jobManagerHeartbeatManager.monitorTarget(jobManagerResourceID, new HeartbeatTarget<TaskExecutorToJobManagerHeartbeatPayload>() {
 			@Override
-			public void receiveHeartbeat(ResourceID resourceID, AccumulatorReport payload) {
+			public void receiveHeartbeat(ResourceID resourceID, TaskExecutorToJobManagerHeartbeatPayload payload) {
 				jobMasterGateway.heartbeatFromTaskManager(resourceID, payload);
 			}
 
 			@Override
-			public void requestHeartbeat(ResourceID resourceID, AccumulatorReport payload) {
+			public void requestHeartbeat(ResourceID resourceID, TaskExecutorToJobManagerHeartbeatPayload payload) {
 				// request heartbeat will never be called on the task manager side
 			}
 		});
@@ -1913,7 +1942,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 		}
 	}
 
-	private class JobManagerHeartbeatListener implements HeartbeatListener<AllocatedSlotReport, AccumulatorReport> {
+	private class JobManagerHeartbeatListener implements HeartbeatListener<AllocatedSlotReport, TaskExecutorToJobManagerHeartbeatPayload> {
 
 		@Override
 		public void notifyHeartbeatTimeout(final ResourceID resourceID) {
@@ -1942,22 +1971,26 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 		}
 
 		@Override
-		public AccumulatorReport retrievePayload(ResourceID resourceID) {
+		public TaskExecutorToJobManagerHeartbeatPayload retrievePayload(ResourceID resourceID) {
 			validateRunsInMainThread();
 			return jobTable.getConnection(resourceID).map(
 				jobManagerConnection -> {
 					JobID jobId = jobManagerConnection.getJobId();
 
+					Set<ExecutionAttemptID> deployedExecutions = new HashSet<>();
 					List<AccumulatorSnapshot> accumulatorSnapshots = new ArrayList<>(16);
 					Iterator<Task> allTasks = taskSlotTable.getTasks(jobId);
 
 					while (allTasks.hasNext()) {
 						Task task = allTasks.next();
+						deployedExecutions.add(task.getExecutionId());
 						accumulatorSnapshots.add(task.getAccumulatorRegistry().getSnapshot());
 					}
-					return new AccumulatorReport(accumulatorSnapshots);
+					return new TaskExecutorToJobManagerHeartbeatPayload(
+						new AccumulatorReport(accumulatorSnapshots),
+						new ExecutionDeploymentReport(deployedExecutions));
 				}
-			).orElseGet(() -> new AccumulatorReport(Collections.emptyList()));
+			).orElseGet(TaskExecutorToJobManagerHeartbeatPayload::empty);
 		}
 	}
 

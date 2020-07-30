@@ -22,7 +22,7 @@ import org.apache.flink.api.common.functions.RuntimeContext
 import org.apache.flink.streaming.api.environment.LocalStreamEnvironment
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment => ScalaStreamExecEnv}
 import org.apache.flink.table.api.internal.TableEnvironmentImpl
-import org.apache.flink.table.api.scala.StreamTableEnvironment
+import org.apache.flink.table.api.bridge.scala.StreamTableEnvironment
 import org.apache.flink.table.api.{DataTypes, EnvironmentSettings}
 import org.apache.flink.table.planner.calcite.{FlinkTypeFactory, FlinkTypeSystem}
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext
@@ -68,6 +68,7 @@ abstract class AggTestBase(isBatchMode: Boolean) {
     when(aggInfo, "agg").thenReturn(call)
     when(call, "getName").thenReturn("avg1")
     when(aggInfo, "function").thenReturn(new LongAvgAggFunction)
+    when(aggInfo, "externalArgTypes").thenReturn(Array(DataTypes.BIGINT))
     when(aggInfo, "externalAccTypes").thenReturn(Array(DataTypes.BIGINT, DataTypes.BIGINT))
     when(aggInfo, "argIndexes").thenReturn(Array(1))
     when(aggInfo, "aggIndex").thenReturn(0)
@@ -81,6 +82,7 @@ abstract class AggTestBase(isBatchMode: Boolean) {
     when(aggInfo, "agg").thenReturn(call)
     when(call, "getName").thenReturn("avg2")
     when(aggInfo, "function").thenReturn(new DoubleAvgAggFunction)
+    when(aggInfo, "externalArgTypes").thenReturn(Array(DataTypes.DOUBLE()))
     when(aggInfo, "externalAccTypes").thenReturn(Array(DataTypes.DOUBLE, DataTypes.BIGINT))
     when(aggInfo, "argIndexes").thenReturn(Array(2))
     when(aggInfo, "aggIndex").thenReturn(1)
@@ -95,6 +97,7 @@ abstract class AggTestBase(isBatchMode: Boolean) {
     when(aggInfo, "agg").thenReturn(call)
     when(call, "getName").thenReturn("avg3")
     when(aggInfo, "function").thenReturn(imperativeAggFunc)
+    when(aggInfo, "externalArgTypes").thenReturn(Array(DataTypes.BIGINT()))
     when(aggInfo, "externalAccTypes").thenReturn(
       Array(fromLegacyInfoToDataType(imperativeAggFunc.getAccumulatorType)))
     when(aggInfo, "externalResultType").thenReturn(DataTypes.BIGINT)

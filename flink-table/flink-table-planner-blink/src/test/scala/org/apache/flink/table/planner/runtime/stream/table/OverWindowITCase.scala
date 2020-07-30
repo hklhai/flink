@@ -20,8 +20,8 @@ package org.apache.flink.table.planner.runtime.stream.table
 
 import org.apache.flink.api.scala._
 import org.apache.flink.table.api.Expressions.$
-import org.apache.flink.table.api.scala._
-import org.apache.flink.table.api.{DataTypes, Expressions, Over}
+import org.apache.flink.table.api._
+import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions.{CountDistinct, CountDistinctWithRetractAndReset, WeightedAvg}
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.JavaFunc0
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
@@ -39,6 +39,13 @@ import scala.collection.mutable
 
 @RunWith(classOf[Parameterized])
 class OverWindowITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode) {
+
+  @Before
+  def setupEnv(): Unit = {
+    // unaligned checkpoints are regenerating watermarks after recovery of in-flight data
+    // https://issues.apache.org/jira/browse/FLINK-18405
+    env.getCheckpointConfig.enableUnalignedCheckpoints(false)
+  }
 
   @Test
   def testProcTimeUnBoundedPartitionedRowOver(): Unit = {
@@ -67,7 +74,7 @@ class OverWindowITCase(mode: StateBackendMode) extends StreamingWithStateTestBas
       Over partitionBy 'c orderBy 'proctime preceding UNBOUNDED_ROW as 'w)
       .select('c,
         countFun('b) over 'w as 'mycount,
-        weightAvgFun('a, 'b) over 'w as 'wAvg,
+        call(weightAvgFun, 'a, 'b) over 'w as 'wAvg,
         countDist('a) over 'w as 'countDist)
       .select('c, 'mycount, 'wAvg, 'countDist)
 
@@ -160,7 +167,7 @@ class OverWindowITCase(mode: StateBackendMode) extends StreamingWithStateTestBas
         'b.max over 'w,
         'b.min over 'w,
         ('b.min over 'w).abs(),
-        weightAvgFun('b, 'a) over 'w,
+        call(weightAvgFun, 'b, 'a) over 'w,
         countDist('c) over 'w as 'countDist)
 
     val sink = new TestingAppendSink

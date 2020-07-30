@@ -19,8 +19,7 @@
 package org.apache.flink.table.planner.plan.stream.table
 
 import org.apache.flink.api.scala._
-import org.apache.flink.table.api.scala._
-import org.apache.flink.table.api.{Over, Slide}
+import org.apache.flink.table.api._
 import org.apache.flink.table.functions.ScalarFunction
 import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions.{CountDistinct, WeightedAvg}
 import org.apache.flink.table.planner.utils.{CountAggFunction, TableFunc0, TableTestBase}
@@ -164,7 +163,7 @@ class ColumnFunctionsTest extends TableTestBase {
     val countDist = new CountDistinct
 
    util.addFunction("countFun", countFun)
-   util.addFunction("weightAvgFun", weightAvgFun)
+   util.addTemporarySystemFunction("weightAvgFun", weightAvgFun)
    util.addFunction("countDist", countDist)
 
     val tab1 = table

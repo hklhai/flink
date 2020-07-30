@@ -51,8 +51,8 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -60,6 +60,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.apache.flink.yarn.YarnConfigKeys.ENV_FLINK_CLASSPATH;
+import static org.apache.flink.yarn.YarnConfigKeys.LOCAL_RESOURCE_DESCRIPTOR_SEPARATOR;
 
 /**
  * Utility class that provides helper methods to work with Apache Hadoop YARN.
@@ -67,9 +68,6 @@ import static org.apache.flink.yarn.YarnConfigKeys.ENV_FLINK_CLASSPATH;
 public final class Utils {
 
 	private static final Logger LOG = LoggerFactory.getLogger(Utils.class);
-
-	/** Keytab file name populated in YARN container. */
-	public static final String DEFAULT_KEYTAB_FILE = "krb5.keytab";
 
 	/** KRB5 file name populated in YARN container for secure IT run. */
 	public static final String KRB5_FILE_NAME = "krb5.conf";
@@ -125,25 +123,35 @@ public final class Utils {
 	static LocalResource registerLocalResource(
 			Path remoteRsrcPath,
 			long resourceSize,
-			long resourceModificationTime) {
+			long resourceModificationTime,
+			LocalResourceVisibility resourceVisibility,
+			LocalResourceType resourceType) {
 		LocalResource localResource = Records.newRecord(LocalResource.class);
 		localResource.setResource(ConverterUtils.getYarnUrlFromURI(remoteRsrcPath.toUri()));
 		localResource.setSize(resourceSize);
 		localResource.setTimestamp(resourceModificationTime);
-		localResource.setType(LocalResourceType.FILE);
-		localResource.setVisibility(LocalResourceVisibility.APPLICATION);
+		localResource.setType(resourceType);
+		localResource.setVisibility(resourceVisibility);
 		return localResource;
 	}
 
-	private static LocalResource registerLocalResource(FileSystem fs, Path remoteRsrcPath) throws IOException {
-		LocalResource localResource = Records.newRecord(LocalResource.class);
+	/**
+	 * Creates a YARN resource for the remote object at the given location.
+	 * @param fs remote filesystem
+	 * @param remoteRsrcPath resource path to be registered
+	 * @return YARN resource
+	 */
+	private static LocalResource registerLocalResource(
+			FileSystem fs,
+			Path remoteRsrcPath,
+			LocalResourceType resourceType) throws IOException {
 		FileStatus jarStat = fs.getFileStatus(remoteRsrcPath);
-		localResource.setResource(ConverterUtils.getYarnUrlFromURI(remoteRsrcPath.toUri()));
-		localResource.setSize(jarStat.getLen());
-		localResource.setTimestamp(jarStat.getModificationTime());
-		localResource.setType(LocalResourceType.FILE);
-		localResource.setVisibility(LocalResourceVisibility.APPLICATION);
-		return localResource;
+		return registerLocalResource(
+			remoteRsrcPath,
+			jarStat.getLen(),
+			jarStat.getModificationTime(),
+			LocalResourceVisibility.APPLICATION,
+			resourceType);
 	}
 
 	public static void setTokensFor(ContainerLaunchContext amContainer, List<Path> paths, Configuration conf) throws IOException {
@@ -319,8 +327,8 @@ public final class Utils {
 
 		// get and validate all relevant variables
 
-		String remoteFlinkJarPath = env.get(YarnConfigKeys.FLINK_JAR_PATH);
-		require(remoteFlinkJarPath != null, "Environment variable %s not set", YarnConfigKeys.FLINK_JAR_PATH);
+		String remoteFlinkJarPath = env.get(YarnConfigKeys.FLINK_DIST_JAR);
+		require(remoteFlinkJarPath != null, "Environment variable %s not set", YarnConfigKeys.FLINK_DIST_JAR);
 
 		String appId = env.get(YarnConfigKeys.ENV_APP_ID);
 		require(appId != null, "Environment variable %s not set", YarnConfigKeys.ENV_APP_ID);
@@ -357,7 +365,7 @@ public final class Utils {
 			log.info("Adding keytab {} to the AM container local resource bucket", remoteKeytabPath);
 			Path keytabPath = new Path(remoteKeytabPath);
 			FileSystem fs = keytabPath.getFileSystem(yarnConfig);
-			keytabResource = registerLocalResource(fs, keytabPath);
+			keytabResource = registerLocalResource(fs, keytabPath, LocalResourceType.FILE);
 		}
 
 		//To support Yarn Secure Integration Test Scenario
@@ -368,30 +376,25 @@ public final class Utils {
 			log.info("TM:Adding remoteYarnConfPath {} to the container local resource bucket", remoteYarnConfPath);
 			Path yarnConfPath = new Path(remoteYarnConfPath);
 			FileSystem fs = yarnConfPath.getFileSystem(yarnConfig);
-			yarnConfResource = registerLocalResource(fs, yarnConfPath);
+			yarnConfResource = registerLocalResource(fs, yarnConfPath, LocalResourceType.FILE);
 		}
 
 		if (remoteKrb5Path != null) {
 			log.info("TM:Adding remoteKrb5Path {} to the container local resource bucket", remoteKrb5Path);
 			Path krb5ConfPath = new Path(remoteKrb5Path);
 			FileSystem fs = krb5ConfPath.getFileSystem(yarnConfig);
-			krb5ConfResource = registerLocalResource(fs, krb5ConfPath);
+			krb5ConfResource = registerLocalResource(fs, krb5ConfPath, LocalResourceType.FILE);
 			hasKrb5 = true;
-		}
-
-		// register Flink Jar with remote HDFS
-		final String flinkJarPath;
-		final LocalResource flinkJar;
-		{
-			Path remoteJarPath = new Path(remoteFlinkJarPath);
-			FileSystem fs = remoteJarPath.getFileSystem(yarnConfig);
-			flinkJarPath = remoteJarPath.getName();
-			flinkJar = registerLocalResource(fs, remoteJarPath);
 		}
 
 		Map<String, LocalResource> taskManagerLocalResources = new HashMap<>();
 
-		taskManagerLocalResources.put(flinkJarPath, flinkJar);
+		// register Flink Jar with remote HDFS
+		final YarnLocalResourceDescriptor flinkDistLocalResourceDesc =
+				YarnLocalResourceDescriptor.fromString(remoteFlinkJarPath);
+		taskManagerLocalResources.put(
+				flinkDistLocalResourceDesc.getResourceKey(),
+				flinkDistLocalResourceDesc.toLocalResource());
 
 		//To support Yarn Secure Integration Test Scenario
 		if (yarnConfResource != null) {
@@ -405,15 +408,8 @@ public final class Utils {
 		}
 
 		// prepare additional files to be shipped
-		for (String pathStr : shipListString.split(",")) {
-			if (!pathStr.isEmpty()) {
-				String[] keyAndPath = pathStr.split("=");
-				require(keyAndPath.length == 2, "Invalid entry in ship file list: %s", pathStr);
-				Path path = new Path(keyAndPath[1]);
-				LocalResource resource = registerLocalResource(path.getFileSystem(yarnConfig), path);
-				taskManagerLocalResources.put(keyAndPath[0], resource);
-			}
-		}
+		decodeYarnLocalResourceDescriptorListFromString(shipListString).forEach(
+			resourceDesc -> taskManagerLocalResources.put(resourceDesc.getResourceKey(), resourceDesc.toLocalResource()));
 
 		// now that all resources are prepared, we can create the launch context
 
@@ -465,14 +461,7 @@ public final class Utils {
 			log.debug("Adding security tokens to TaskExecutor's container launch context.");
 
 			try (DataOutputBuffer dob = new DataOutputBuffer()) {
-				Method readTokenStorageFileMethod = Credentials.class.getMethod(
-					"readTokenStorageFile", File.class, org.apache.hadoop.conf.Configuration.class);
-
-				Credentials cred =
-					(Credentials) readTokenStorageFileMethod.invoke(
-						null,
-						new File(fileLocation),
-						HadoopUtils.getHadoopConfiguration(flinkConfig));
+				Credentials cred = Credentials.readTokenStorageFile(new File(fileLocation), HadoopUtils.getHadoopConfiguration(flinkConfig));
 
 				// Filter out AMRMToken before setting the tokens to the TaskManager container context.
 				Credentials taskManagerCred = new Credentials();
@@ -495,6 +484,21 @@ public final class Utils {
 		}
 
 		return ctx;
+	}
+
+	static boolean isRemotePath(String path) throws IOException {
+		org.apache.flink.core.fs.Path flinkPath = new org.apache.flink.core.fs.Path(path);
+		return flinkPath.getFileSystem().isDistributedFS();
+	}
+
+	private static List<YarnLocalResourceDescriptor> decodeYarnLocalResourceDescriptorListFromString(String resources) throws Exception {
+		final List<YarnLocalResourceDescriptor> resourceDescriptors = new ArrayList<>();
+		for (String shipResourceDescStr : resources.split(LOCAL_RESOURCE_DESCRIPTOR_SEPARATOR)) {
+			if (!shipResourceDescStr.isEmpty()) {
+				resourceDescriptors.add(YarnLocalResourceDescriptor.fromString(shipResourceDescStr));
+			}
+		}
+		return resourceDescriptors;
 	}
 
 	/**

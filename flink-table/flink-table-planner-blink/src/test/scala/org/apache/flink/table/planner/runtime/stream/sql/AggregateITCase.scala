@@ -19,17 +19,17 @@ package org.apache.flink.table.planner.runtime.stream.sql
 
 import org.apache.flink.api.common.time.Time
 import org.apache.flink.api.common.typeinfo.TypeInformation
-import org.apache.flink.api.java.tuple.{Tuple2 => JTuple2}
 import org.apache.flink.api.java.typeutils.RowTypeInfo
 import org.apache.flink.api.scala._
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.scala.DataStream
-import org.apache.flink.table.api.Types
-import org.apache.flink.table.api.scala._
-import org.apache.flink.table.planner.factories.TestValuesTableFactory
+import org.apache.flink.table.api.bridge.scala._
+import org.apache.flink.table.api.internal.TableEnvironmentInternal
+import org.apache.flink.table.api.{Types, _}
 import org.apache.flink.table.planner.functions.aggfunctions.{ListAggWithRetractAggFunction, ListAggWsWithRetractAggFunction}
 import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions.VarSumAggFunction
 import org.apache.flink.table.planner.runtime.batch.sql.agg.{MyPojoAggFunction, VarArgsAggFunction}
+import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedAggFunctions.OverloadedMaxFunction
 import org.apache.flink.table.planner.runtime.utils.StreamingWithAggTestBase.AggMode
 import org.apache.flink.table.planner.runtime.utils.StreamingWithMiniBatchTestBase.MiniBatchMode
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
@@ -38,7 +38,7 @@ import org.apache.flink.table.planner.runtime.utils.UserDefinedFunctionTestUtils
 import org.apache.flink.table.planner.runtime.utils._
 import org.apache.flink.table.planner.utils.DateTimeTestUtil.{localDate, localDateTime, localTime => mLocalTime}
 import org.apache.flink.table.runtime.typeutils.BigDecimalTypeInfo
-import org.apache.flink.types.{Row, RowKind}
+import org.apache.flink.types.Row
 
 import org.junit.Assert.assertEquals
 import org.junit._
@@ -242,7 +242,7 @@ class AggregateITCase(
         mLocalTime(times(i)), decimal, int, long, chars(i)))
     }
 
-    val inputs = util.Random.shuffle(data)
+    val inputs = Random.shuffle(data)
 
     val rowType = new RowTypeInfo(
       Types.INT, Types.LOCAL_DATE_TIME, Types.LOCAL_DATE, Types.LOCAL_TIME,
@@ -384,7 +384,7 @@ class AggregateITCase(
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
     tEnv.registerTable("T", t)
-    tEnv.registerFunction("CntNullNonNull", new CountNullNonNull)
+    tEnv.createTemporarySystemFunction("CntNullNonNull", new CountNullNonNull)
     val t1 = tEnv.sqlQuery(
       "SELECT b, count(*), CntNullNonNull(DISTINCT c)  FROM T GROUP BY b")
 
@@ -829,7 +829,7 @@ class AggregateITCase(
 
     val t = failingDataSource(data).toTable(tEnv, 'id, 's, 's1, 's2)
     tEnv.registerTable("MyTable", t)
-    tEnv.registerFunction("func", new VarArgsAggFunction)
+    tEnv.createTemporarySystemFunction("func", classOf[VarArgsAggFunction])
 
     val sql = "SELECT func(s, s1, s2) FROM MyTable"
     val sink = new TestingRetractSink
@@ -849,7 +849,7 @@ class AggregateITCase(
 
     val t = failingDataSource(data).toTable(tEnv, 'id, 's, 's1, 's2)
     tEnv.registerTable("MyTable", t)
-    tEnv.registerFunction("func", new VarArgsAggFunction)
+    tEnv.createTemporarySystemFunction("func", classOf[VarArgsAggFunction])
 
     val sink = new TestingRetractSink
     tEnv
@@ -1110,7 +1110,7 @@ class AggregateITCase(
 
   @Test
   def testLongVarargsAgg(): Unit = {
-    tEnv.registerFunction("var_sum", new VarSumAggFunction)
+    tEnv.createTemporarySystemFunction("var_sum", classOf[VarSumAggFunction])
     val sqlQuery = s"SELECT a, " +
       s"var_sum(${0.until(260).map(_ => "b").mkString(",")}) from MyTable group by a"
     val data = Seq[(Int, Int)]((1, 1), (2,2))
@@ -1209,7 +1209,7 @@ class AggregateITCase(
     t1.toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
     val expected = List("1", "3")
-    assertEquals(expected, sink.getRetractResults)
+    assertEquals(expected.sorted, sink.getRetractResults.sorted)
   }
 
   @Test
@@ -1241,92 +1241,86 @@ class AggregateITCase(
 
     val tableSink = new TestingUpsertTableSink(Array(0)).configure(
       Array[String]("c", "bMax"), Array[TypeInformation[_]](Types.STRING, Types.LONG))
-    tEnv.registerTableSink("testSink", tableSink)
+    tEnv.asInstanceOf[TableEnvironmentInternal].registerTableSinkInternal("testSink", tableSink)
 
-    tEnv.sqlUpdate(
+    execInsertSqlAndWaitResult(
       """
         |insert into testSink
         |select c, max(b) from
         | (select b, c, true as f from MyTable) t
         |group by c, f
       """.stripMargin)
-    tEnv.execute("test")
 
     val expected = List("A,1", "B,2", "C,3")
     assertEquals(expected.sorted, tableSink.getUpsertResults.sorted)
   }
 
   @Test
-  def testAggregateOnChangelogSource(): Unit = {
-    val dataId = TestValuesTableFactory.registerChangelogData(TestData.userChangelog)
-    val ddl =
-      s"""
-         |CREATE TABLE user_logs (
-         |  user_id STRING,
-         |  user_name STRING,
-         |  email STRING,
-         |  balance DECIMAL(18,2)
-         |) WITH (
-         | 'connector' = 'values',
-         | 'data-id' = '$dataId',
-         | 'changelog-mode' = 'I,UA,UB,D'
-         |)
-         |""".stripMargin
-    tEnv.executeSql(ddl)
+  def testAggregationCodeSplit(): Unit = {
 
-    val query =
-      s"""
-         |SELECT count(*), sum(balance), max(email)
-         |FROM user_logs
-         |""".stripMargin
+    val t = env.fromCollection(TestData.smallTupleData3)
+      .toTable(tEnv, 'a, 'b, 'c)
+    tEnv.createTemporaryView("MyTable", t)
 
-    val result = tEnv.sqlQuery(query).toRetractStream[Row]
-    val sink = new TestingRetractSink()
-    result.addSink(sink).setParallelism(result.parallelism)
+    tEnv.getConfig.setMaxGeneratedCodeLength(2048)
+
+    // 50 can make sure all generated methods of [Namespace]AggsHandleFunction is longer than 2048
+    val columnNumber = 50
+
+    val selectList = Stream.range(3, columnNumber)
+      .map(i => s"SUM(CASE WHEN a IS NOT NULL AND a > $i THEN 0 WHEN a < 0 THEN 0 ELSE $i END)")
+      .mkString(",")
+    val sqlQuery = s"select $selectList from MyTable group by b, c"
+
+    val result = tEnv.sqlQuery(sqlQuery).toRetractStream[Row]
+    val sink = new TestingRetractSink
+    result.addSink(sink)
     env.execute()
 
-    val expected = Seq("3,29.39,tom123@gmail.com")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    val expected = Stream.range(3, columnNumber).map(_.toString).mkString(",")
+    assertEquals(sink.getRawResults.size, 3)
+    sink.getRetractResults.foreach(result =>
+      assertEquals(expected, result)
+    )
   }
 
   @Test
-  def testAggregateOnInsertDeleteChangelogSource(): Unit = {
-    // only contains INSERT and DELETE
-    val userChangelog = TestData.userChangelog.map { tuple =>
-      tuple.f0 match {
-        case RowKind.INSERT | RowKind.DELETE => tuple
-        case RowKind.UPDATE_BEFORE => JTuple2.of(RowKind.DELETE, tuple.f1)
-        case RowKind.UPDATE_AFTER => JTuple2.of(RowKind.INSERT, tuple.f1)
-      }
-    }
-    val dataId = TestValuesTableFactory.registerChangelogData(userChangelog)
-    val ddl =
-      s"""
-         |CREATE TABLE user_logs (
-         |  user_id STRING,
-         |  user_name STRING,
-         |  email STRING,
-         |  balance DECIMAL(18,2)
-         |) WITH (
-         | 'connector' = 'values',
-         | 'data-id' = '$dataId',
-         | 'changelog-mode' = 'I,D'
-         |)
-         |""".stripMargin
-    tEnv.executeSql(ddl)
+  def testOverloadedAccumulator(): Unit = {
+    val data = new mutable.MutableList[(String, Long)]
+    data .+= (("x", 1L))
+    data .+= (("x", 2L))
+    data .+= (("x", 3L))
+    data .+= (("y", 1L))
+    data .+= (("y", 2L))
+    data .+= (("z", 3L))
 
-    val query =
-      s"""
-         |SELECT count(*), sum(balance), max(email)
-         |FROM user_logs
-         |""".stripMargin
+    val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
+    tEnv.createTemporaryView("T", t)
+    tEnv.createTemporarySystemFunction("OverloadedMaxFunction", classOf[OverloadedMaxFunction])
 
-    val result = tEnv.sqlQuery(query).toRetractStream[Row]
-    val sink = new TestingRetractSink()
-    result.addSink(sink).setParallelism(result.parallelism)
+    val sink1 = new TestingRetractSink
+    val sink2 = new TestingRetractSink
+
+    tEnv.sqlQuery("SELECT a, OverloadedMaxFunction(b) FROM T GROUP BY a")
+      .toRetractStream[Row]
+      .addSink(sink1)
+
+    tEnv.sqlQuery("SELECT b, OverloadedMaxFunction(a) FROM T GROUP BY b")
+      .toRetractStream[Row]
+      .addSink(sink2)
+
     env.execute()
 
-    val expected = Seq("3,29.39,tom123@gmail.com")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    val expected1 = List(
+      "x,3",
+      "y,2",
+      "z,3")
+    assertEquals(expected1.sorted, sink1.getRetractResults.sorted)
+
+    val expected2 = List(
+      "1,y",
+      "2,y",
+      "3,z")
+    assertEquals(expected2.sorted, sink2.getRetractResults.sorted)
   }
 }

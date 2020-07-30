@@ -22,18 +22,20 @@ import org.apache.flink.api.common.typeinfo.Types.STRING
 import org.apache.flink.api.scala._
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment => ScalaStreamExecutionEnvironment}
-import org.apache.flink.table.api.internal.TableEnvironmentImpl
-import org.apache.flink.table.api.java.StreamTableEnvironment
-import org.apache.flink.table.api.scala.{StreamTableEnvironment => ScalaStreamTableEnvironment, _}
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment
+import org.apache.flink.table.api.bridge.scala.{StreamTableEnvironment => ScalaStreamTableEnvironment, _}
+import org.apache.flink.table.api.internal.{TableEnvironmentImpl, TableEnvironmentInternal}
 import org.apache.flink.table.planner.factories.utils.TestCollectionTableFactory
-import org.apache.flink.table.planner.runtime.utils.TestingAppendSink
+import org.apache.flink.table.planner.runtime.utils.{TableEnvUtil, TestingAppendSink}
 import org.apache.flink.table.planner.utils.TableTestUtil.{readFromResource, replaceStageId}
-import org.apache.flink.table.planner.utils.TestTableSourceSinks
-import org.apache.flink.types.Row
+import org.apache.flink.table.planner.utils.{TableTestUtil, TestTableSourceSinks, TestTableSourceWithTime}
+import org.apache.flink.types.{Row, RowKind}
 import org.apache.flink.util.{FileUtils, TestLogger}
 
+import org.apache.flink.shaded.guava18.com.google.common.collect.Lists
+
 import org.junit.Assert.{assertEquals, assertFalse, assertTrue}
-import org.junit.rules.TemporaryFolder
+import org.junit.rules.{ExpectedException, TemporaryFolder}
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 import org.junit.{Assert, Before, Rule, Test}
@@ -46,6 +48,12 @@ import _root_.scala.collection.mutable
 
 @RunWith(classOf[Parameterized])
 class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends TestLogger {
+
+  // used for accurate exception information checking.
+  val expectedException: ExpectedException = ExpectedException.none()
+
+  @Rule
+  def thrown: ExpectedException = expectedException
 
   private val _tempFolder = new TemporaryFolder()
 
@@ -268,7 +276,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
       tEnv, new TableSchema(Array("first"), Array(STRING)), "MySink1")
     checkEmptyFile(sinkPath)
     val tableResult = tEnv.executeSql("insert into MySink1 select first from MyTable")
-    checkInsertTableResult(tableResult)
+    checkInsertTableResult(tableResult, "default_catalog.default_database.MySink1")
     // wait job finished
     tableResult.getJobClient.get()
       .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
@@ -284,7 +292,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     }
 
     val sinkPath = _tempFolder.newFolder().toString
-    tEnv.sqlUpdate(
+    tEnv.executeSql(
       s"""
          |create table MySink (
          |  first string
@@ -297,7 +305,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     )
 
     val tableResult1 = tEnv.executeSql("insert overwrite MySink select first from MyTable")
-    checkInsertTableResult(tableResult1)
+    checkInsertTableResult(tableResult1, "default_catalog.default_database.MySink")
     // wait job finished
     tableResult1.getJobClient.get()
       .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
@@ -305,7 +313,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     assertFirstValues(sinkPath)
 
     val tableResult2 =  tEnv.executeSql("insert overwrite MySink select first from MyTable")
-    checkInsertTableResult(tableResult2)
+    checkInsertTableResult(tableResult2, "default_catalog.default_database.MySink")
     // wait job finished
     tableResult2.getJobClient.get()
       .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
@@ -323,7 +331,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     checkEmptyFile(sink2Path)
 
     val tableResult = tEnv.executeSql("insert into MySink1 select first from MyTable")
-    checkInsertTableResult(tableResult)
+    checkInsertTableResult(tableResult, "default_catalog.default_database.MySink1")
     // wait job finished
     tableResult.getJobClient.get()
       .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
@@ -361,7 +369,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     resultSet.addSink(sink)
 
     val tableResult = streamTableEnv.executeSql("insert into MySink1 select first from MyTable")
-    checkInsertTableResult(tableResult)
+    checkInsertTableResult(tableResult, "default_catalog.default_database.MySink1")
     // wait job finished
     tableResult.getJobClient.get()
       .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
@@ -386,7 +394,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     checkEmptyFile(sinkPath)
     val table = tEnv.sqlQuery("select first from MyTable")
     val tableResult = table.executeInsert("MySink")
-    checkInsertTableResult(tableResult)
+    checkInsertTableResult(tableResult, "default_catalog.default_database.MySink")
     // wait job finished
     tableResult.getJobClient.get()
       .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
@@ -401,7 +409,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
       return
     }
     val sinkPath = _tempFolder.newFolder().toString
-    tEnv.sqlUpdate(
+    tEnv.executeSql(
       s"""
          |create table MySink (
          |  first string
@@ -413,7 +421,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
        """.stripMargin
     )
     val tableResult1 = tEnv.sqlQuery("select first from MyTable").executeInsert("MySink", true)
-    checkInsertTableResult(tableResult1)
+    checkInsertTableResult(tableResult1, "default_catalog.default_database.MySink")
     // wait job finished
     tableResult1.getJobClient.get()
       .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
@@ -421,7 +429,7 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     assertFirstValues(sinkPath)
 
     val tableResult2 = tEnv.sqlQuery("select first from MyTable").executeInsert("MySink", true)
-    checkInsertTableResult(tableResult2)
+    checkInsertTableResult(tableResult2, "default_catalog.default_database.MySink")
     // wait job finished
     tableResult2.getJobClient.get()
       .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
@@ -430,25 +438,244 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
   }
 
   @Test
+  def testStatementSet(): Unit = {
+    val sink1Path = TestTableSourceSinks.createCsvTemporarySinkTable(
+      tEnv, new TableSchema(Array("first"), Array(STRING)), "MySink1")
+
+    val sink2Path = TestTableSourceSinks.createCsvTemporarySinkTable(
+      tEnv, new TableSchema(Array("last"), Array(STRING)), "MySink2")
+
+    val stmtSet = tEnv.createStatementSet()
+    stmtSet.addInsert("MySink1", tEnv.sqlQuery("select first from MyTable"))
+      .addInsertSql("insert into MySink2 select last from MyTable")
+
+    val actual = stmtSet.explain()
+    val expected = TableTestUtil.readFromResource("/explain/testStatementSet.out")
+    assertEquals(replaceStageId(expected), replaceStageId(actual))
+
+    val tableResult = stmtSet.execute()
+    checkInsertTableResult(
+      tableResult,
+      "default_catalog.default_database.MySink1",
+      "default_catalog.default_database.MySink2")
+    // wait job finished
+    tableResult.getJobClient.get()
+      .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
+      .get()
+
+    assertFirstValues(sink1Path)
+    assertLastValues(sink2Path)
+  }
+
+  @Test
+  def testStatementSetWithOverwrite(): Unit = {
+    if(isStreaming) {
+      // Streaming mode not support overwrite for FileSystemTableSink.
+      return
+    }
+    val sink1Path = _tempFolder.newFolder().toString
+    tEnv.executeSql(
+      s"""
+         |create table MySink1 (
+         |  first string
+         |) with (
+         |  'connector' = 'filesystem',
+         |  'path' = '$sink1Path',
+         |  'format' = 'testcsv'
+         |)
+       """.stripMargin
+    )
+
+    val sink2Path = _tempFolder.newFolder().toString
+    tEnv.executeSql(
+      s"""
+         |create table MySink2 (
+         |  last string
+         |) with (
+         |  'connector' = 'filesystem',
+         |  'path' = '$sink2Path',
+         |  'format' = 'testcsv'
+         |)
+       """.stripMargin
+    )
+
+    val stmtSet = tEnv.createStatementSet()
+    stmtSet.addInsert("MySink1", tEnv.sqlQuery("select first from MyTable"), true)
+    stmtSet.addInsertSql("insert overwrite MySink2 select last from MyTable")
+
+    val tableResult1 = stmtSet.execute()
+    checkInsertTableResult(
+      tableResult1,
+      "default_catalog.default_database.MySink1",
+      "default_catalog.default_database.MySink2")
+    // wait job finished
+    tableResult1.getJobClient.get()
+      .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
+      .get()
+
+    assertFirstValues(sink1Path)
+    assertLastValues(sink2Path)
+
+    // execute again using same StatementSet instance
+    stmtSet.addInsert("MySink1", tEnv.sqlQuery("select first from MyTable"), true)
+      .addInsertSql("insert overwrite MySink2 select last from MyTable")
+
+    val tableResult2 = stmtSet.execute()
+    checkInsertTableResult(
+      tableResult2,
+      "default_catalog.default_database.MySink1",
+      "default_catalog.default_database.MySink2")
+    // wait job finished
+    tableResult2.getJobClient.get()
+      .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
+      .get()
+
+    assertFirstValues(sink1Path)
+    assertLastValues(sink2Path)
+  }
+
+  @Test
+  def testStatementSetWithSameSinkTableNames(): Unit = {
+    if(isStreaming) {
+      // Streaming mode not support overwrite for FileSystemTableSink.
+      return
+    }
+    val sinkPath = _tempFolder.newFolder().toString
+    tEnv.executeSql(
+      s"""
+         |create table MySink (
+         |  first string
+         |) with (
+         |  'connector' = 'filesystem',
+         |  'path' = '$sinkPath',
+         |  'format' = 'testcsv'
+         |)
+       """.stripMargin
+    )
+
+    val stmtSet = tEnv.createStatementSet()
+    stmtSet.addInsert("MySink", tEnv.sqlQuery("select first from MyTable"), true)
+    stmtSet.addInsertSql("insert overwrite MySink select last from MyTable")
+
+    val tableResult = stmtSet.execute()
+    // wait job finished
+    tableResult.getJobClient.get()
+      .getJobExecutionResult(Thread.currentThread().getContextClassLoader)
+      .get()
+    // only check the schema
+    checkInsertTableResult(
+      tableResult,
+      "default_catalog.default_database.MySink_1",
+      "default_catalog.default_database.MySink_2")
+  }
+
+  @Test
+  def testExecuteSelect(): Unit = {
+    val query =
+      """
+        |select id, concat(concat(`first`, ' '), `last`) as `full name`
+        |from MyTable where mod(id, 2) = 0
+      """.stripMargin
+    val tableResult = tEnv.executeSql(query)
+    assertTrue(tableResult.getJobClient.isPresent)
+    assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult.getResultKind)
+    assertEquals(
+      TableSchema.builder()
+        .field("id", DataTypes.INT())
+        .field("full name", DataTypes.STRING())
+        .build(),
+      tableResult.getTableSchema)
+    val expected = util.Arrays.asList(
+      Row.of(Integer.valueOf(2), "Bob Taylor"),
+      Row.of(Integer.valueOf(4), "Peter Smith"),
+      Row.of(Integer.valueOf(6), "Sally Miller"),
+      Row.of(Integer.valueOf(8), "Kelly Williams"))
+    val actual = Lists.newArrayList(tableResult.collect())
+    actual.sort(new util.Comparator[Row]() {
+      override def compare(o1: Row, o2: Row): Int = {
+        o1.getField(0).asInstanceOf[Int].compareTo(o2.getField(0).asInstanceOf[Int])
+      }
+    })
+    assertEquals(expected, actual)
+  }
+
+  @Test
+  def testExecuteSelectWithUpdateChanges(): Unit = {
+    val tableResult = tEnv.sqlQuery("select count(*) as c from MyTable").execute()
+    assertTrue(tableResult.getJobClient.isPresent)
+    assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult.getResultKind)
+    assertEquals(
+      TableSchema.builder().field("c", DataTypes.BIGINT().notNull()).build(),
+      tableResult.getTableSchema)
+    val expected = if (isStreaming) {
+      util.Arrays.asList(
+        Row.ofKind(RowKind.INSERT, JLong.valueOf(1)),
+        Row.ofKind(RowKind.UPDATE_BEFORE, JLong.valueOf(1)),
+        Row.ofKind(RowKind.UPDATE_AFTER, JLong.valueOf(2)),
+        Row.ofKind(RowKind.UPDATE_BEFORE, JLong.valueOf(2)),
+        Row.ofKind(RowKind.UPDATE_AFTER, JLong.valueOf(3)),
+        Row.ofKind(RowKind.UPDATE_BEFORE, JLong.valueOf(3)),
+        Row.ofKind(RowKind.UPDATE_AFTER, JLong.valueOf(4)),
+        Row.ofKind(RowKind.UPDATE_BEFORE, JLong.valueOf(4)),
+        Row.ofKind(RowKind.UPDATE_AFTER, JLong.valueOf(5)),
+        Row.ofKind(RowKind.UPDATE_BEFORE, JLong.valueOf(5)),
+        Row.ofKind(RowKind.UPDATE_AFTER, JLong.valueOf(6)),
+        Row.ofKind(RowKind.UPDATE_BEFORE, JLong.valueOf(6)),
+        Row.ofKind(RowKind.UPDATE_AFTER, JLong.valueOf(7)),
+        Row.ofKind(RowKind.UPDATE_BEFORE, JLong.valueOf(7)),
+        Row.ofKind(RowKind.UPDATE_AFTER, JLong.valueOf(8))
+      )
+    } else {
+      util.Arrays.asList(Row.of(JLong.valueOf(8)))
+    }
+    val actual = Lists.newArrayList(tableResult.collect())
+    assertEquals(expected, actual)
+  }
+
+  @Test
+  def testExecuteSelectWithTimeAttribute(): Unit = {
+    val data = Seq("Mary")
+    val schema = new TableSchema(Array("name", "pt"), Array(Types.STRING, Types.LOCAL_DATE_TIME))
+    val sourceType = Types.STRING
+    val tableSource = new TestTableSourceWithTime(true, schema, sourceType, data, null, "pt")
+    // TODO refactor this after FLINK-16160 is finished
+    tEnv.asInstanceOf[TableEnvironmentInternal].registerTableSourceInternal("T", tableSource)
+
+    val tableResult = tEnv.executeSql("select * from T")
+    assertTrue(tableResult.getJobClient.isPresent)
+    assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult.getResultKind)
+    assertEquals(
+      TableSchema.builder()
+        .field("name", DataTypes.STRING())
+        .field("pt", DataTypes.TIMESTAMP(3))
+        .build(),
+      tableResult.getTableSchema)
+    val it = tableResult.collect()
+    assertTrue(it.hasNext)
+    val row = it.next()
+    assertEquals(2, row.getArity)
+    assertEquals("Mary", row.getField(0))
+    assertFalse(it.hasNext)
+  }
+
+  @Test
   def testClearOperation(): Unit = {
     TestCollectionTableFactory.reset()
     val tableEnv = TableEnvironmentImpl.create(settings)
-    tableEnv.sqlUpdate("create table dest1(x map<int,bigint>) with('connector' = 'COLLECTION')")
-    tableEnv.sqlUpdate("create table dest2(x int) with('connector' = 'COLLECTION')")
-    tableEnv.sqlUpdate("create table src(x int) with('connector' = 'COLLECTION')")
+    tableEnv.executeSql("create table dest1(x map<int,bigint>) with('connector' = 'COLLECTION')")
+    tableEnv.executeSql("create table dest2(x int) with('connector' = 'COLLECTION')")
+    tableEnv.executeSql("create table src(x int) with('connector' = 'COLLECTION')")
 
     try {
       // it would fail due to query and sink type mismatch
-      tableEnv.sqlUpdate("insert into dest1 select count(*) from src")
-      tableEnv.execute("insert dest1")
+      tableEnv.executeSql("insert into dest1 select count(*) from src")
       Assert.fail("insert is expected to fail due to type mismatch")
     } catch {
       case _: Exception => //expected
     }
 
-    tableEnv.sqlUpdate("drop table dest1")
-    tableEnv.sqlUpdate("insert into dest2 select x from src")
-    tableEnv.execute("insert dest2")
+    tableEnv.executeSql("drop table dest1")
+    TableEnvUtil.execInsertSqlAndWaitResult(tableEnv, "insert into dest2 select x from src")
   }
 
   def getPersonData: List[(String, Int, Double, String)] = {
@@ -492,12 +719,16 @@ class TableEnvironmentITCase(tableEnvName: String, isStreaming: Boolean) extends
     assertFalse(new File(path).exists())
   }
 
-  private def checkInsertTableResult(tableResult: TableResult): Unit = {
+  private def checkInsertTableResult(tableResult: TableResult, fieldNames: String*): Unit = {
     assertTrue(tableResult.getJobClient.isPresent)
     assertEquals(ResultKind.SUCCESS_WITH_CONTENT, tableResult.getResultKind)
+    assertEquals(
+      util.Arrays.asList(fieldNames: _*),
+      util.Arrays.asList(tableResult.getTableSchema.getFieldNames: _*))
     val it = tableResult.collect()
     assertTrue(it.hasNext)
-    assertEquals(Row.of(JLong.valueOf(-1L)), it.next())
+    val affectedRowCounts = fieldNames.map(_ => JLong.valueOf(-1L))
+    assertEquals(Row.of(affectedRowCounts: _*), it.next())
     assertFalse(it.hasNext)
   }
 

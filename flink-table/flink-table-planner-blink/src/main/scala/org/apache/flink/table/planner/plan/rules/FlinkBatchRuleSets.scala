@@ -165,6 +165,7 @@ object FlinkBatchRuleSets {
     */
   val FILTER_TABLESCAN_PUSHDOWN_RULES: RuleSet = RuleSets.ofList(
     // push a filter down into the table scan
+    PushFilterIntoTableSourceScanRule.INSTANCE,
     PushFilterIntoLegacyTableSourceScanRule.INSTANCE,
     // push partition into the table scan
     PushPartitionIntoLegacyTableSourceScanRule.INSTANCE
@@ -245,7 +246,9 @@ object FlinkBatchRuleSets {
     */
   private val LOGICAL_RULES: RuleSet = RuleSets.ofList(
     // scan optimization
+    PushProjectIntoTableSourceScanRule.INSTANCE,
     PushProjectIntoLegacyTableSourceScanRule.INSTANCE,
+    PushFilterIntoTableSourceScanRule.INSTANCE,
     PushFilterIntoLegacyTableSourceScanRule.INSTANCE,
 
     // reorder sort and projection
@@ -335,7 +338,8 @@ object FlinkBatchRuleSets {
     FlinkLogicalRank.CONVERTER,
     FlinkLogicalWindowAggregate.CONVERTER,
     FlinkLogicalSnapshot.CONVERTER,
-    FlinkLogicalSink.CONVERTER
+    FlinkLogicalSink.CONVERTER,
+    FlinkLogicalLegacySink.CONVERTER
   )
 
   /**
@@ -423,7 +427,8 @@ object FlinkBatchRuleSets {
     BatchExecCorrelateRule.INSTANCE,
     BatchExecPythonCorrelateRule.INSTANCE,
     // sink
-    BatchExecSinkRule.INSTANCE
+    BatchExecSinkRule.INSTANCE,
+    BatchExecLegacySinkRule.INSTANCE
   )
 
   /**

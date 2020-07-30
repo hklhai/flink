@@ -17,11 +17,10 @@
  */
 package org.apache.flink.table.planner.codegen.agg
 
-import org.apache.flink.api.common.functions.RuntimeContext
 import org.apache.flink.table.api.TableException
 import org.apache.flink.table.data.GenericRowData
 import org.apache.flink.table.expressions._
-import org.apache.flink.table.functions.UserDefinedAggregateFunction
+import org.apache.flink.table.functions.ImperativeAggregateFunction
 import org.apache.flink.table.planner.codegen.CodeGenUtils.{ROW_DATA, _}
 import org.apache.flink.table.planner.codegen.Indenter.toISC
 import org.apache.flink.table.planner.codegen._
@@ -34,8 +33,8 @@ import org.apache.flink.table.planner.plan.utils.AggregateInfoList
 import org.apache.flink.table.runtime.dataview.{StateListView, StateMapView}
 import org.apache.flink.table.runtime.generated._
 import org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter.fromDataTypeToLogicalType
-import org.apache.flink.table.runtime.types.PlannerTypeUtils
 import org.apache.flink.table.types.DataType
+import org.apache.flink.table.types.logical.utils.LogicalTypeUtils
 import org.apache.flink.table.types.logical.{BooleanType, IntType, LogicalType, RowType}
 import org.apache.flink.table.types.utils.TypeConversions.fromLegacyInfoToDataType
 import org.apache.flink.util.Collector
@@ -227,7 +226,7 @@ class AggsHandlerCodeGenerator(
             inputFieldTypes,
             constants,
             relBuilder)
-        case _: UserDefinedAggregateFunction[_, _] =>
+        case _: ImperativeAggregateFunction[_, _] =>
           new ImperativeAggCodeGen(
             ctx,
             aggInfo,
@@ -259,6 +258,7 @@ class AggsHandlerCodeGenerator(
           index,
           innerCodeGens,
           filterExpr.toArray,
+          constantExprs,
           mergedAccOffset,
           aggBufferOffset,
           aggBufferSize,
@@ -332,8 +332,6 @@ class AggsHandlerCodeGenerator(
     val getValueCode = genGetValue()
 
     val functionName = newName(name)
-
-    val RUNTIME_CONTEXT = className[RuntimeContext]
 
     val functionCode =
       j"""
@@ -443,6 +441,9 @@ class AggsHandlerCodeGenerator(
         public final class $functionName implements ${className[TableAggsHandleFunction]} {
 
           ${ctx.reuseMemberCode()}
+
+          private $STATE_DATA_VIEW_STORE store;
+
           private $CONVERT_COLLECTOR_TYPE_TERM $MEMBER_COLLECTOR_TERM;
 
           public $functionName(java.lang.Object[] references) throws Exception {
@@ -450,8 +451,13 @@ class AggsHandlerCodeGenerator(
             $MEMBER_COLLECTOR_TERM = new $CONVERT_COLLECTOR_TYPE_TERM(references);
           }
 
+          private $RUNTIME_CONTEXT getRuntimeContext() {
+            return store.getRuntimeContext();
+          }
+
           @Override
           public void open($STATE_DATA_VIEW_STORE store) throws Exception {
+            this.store = store;
             ${ctx.reuseOpenCode()}
           }
 
@@ -586,12 +592,21 @@ class AggsHandlerCodeGenerator(
 
           ${ctx.reuseMemberCode()}
 
+          private $STATE_DATA_VIEW_STORE store;
+
+          private $namespaceClassName $NAMESPACE_TERM;
+
           public $functionName(Object[] references) throws Exception {
             ${ctx.reuseInitCode()}
           }
 
+          private $RUNTIME_CONTEXT getRuntimeContext() {
+            return store.getRuntimeContext();
+          }
+
           @Override
           public void open($STATE_DATA_VIEW_STORE store) throws Exception {
+            this.store = store;
             ${ctx.reuseOpenCode()}
           }
 
@@ -607,14 +622,14 @@ class AggsHandlerCodeGenerator(
 
           @Override
           public void merge(Object ns, $ROW_DATA $MERGED_ACC_TERM) throws Exception {
-            $namespaceClassName $NAMESPACE_TERM = ($namespaceClassName) ns;
+            $NAMESPACE_TERM = ($namespaceClassName) ns;
             $mergeCode
           }
 
           @Override
           public void setAccumulators(Object ns, $ROW_DATA $ACC_TERM)
           throws Exception {
-            $namespaceClassName $NAMESPACE_TERM = ($namespaceClassName) ns;
+            $NAMESPACE_TERM = ($namespaceClassName) ns;
             $setAccumulatorsCode
           }
 
@@ -630,13 +645,13 @@ class AggsHandlerCodeGenerator(
 
           @Override
           public $ROW_DATA getValue(Object ns) throws Exception {
-            $namespaceClassName $NAMESPACE_TERM = ($namespaceClassName) ns;
+            $NAMESPACE_TERM = ($namespaceClassName) ns;
             $getValueCode
           }
 
           @Override
           public void cleanup(Object ns) throws Exception {
-            $namespaceClassName $NAMESPACE_TERM = ($namespaceClassName) ns;
+            $NAMESPACE_TERM = ($namespaceClassName) ns;
             ${ctx.reuseCleanupCode()}
           }
 
@@ -684,6 +699,11 @@ class AggsHandlerCodeGenerator(
           implements ${className[NamespaceTableAggsHandleFunction[_]]}<$namespaceClassName> {
 
           ${ctx.reuseMemberCode()}
+
+          private $STATE_DATA_VIEW_STORE store;
+
+          private $namespaceClassName $NAMESPACE_TERM;
+
           private $CONVERT_COLLECTOR_TYPE_TERM $MEMBER_COLLECTOR_TERM;
 
           public $functionName(Object[] references) throws Exception {
@@ -691,8 +711,13 @@ class AggsHandlerCodeGenerator(
             $MEMBER_COLLECTOR_TERM = new $CONVERT_COLLECTOR_TYPE_TERM(references);
           }
 
+          private $RUNTIME_CONTEXT getRuntimeContext() {
+            return store.getRuntimeContext();
+          }
+
           @Override
           public void open($STATE_DATA_VIEW_STORE store) throws Exception {
+            this.store = store;
             ${ctx.reuseOpenCode()}
           }
 
@@ -708,14 +733,14 @@ class AggsHandlerCodeGenerator(
 
           @Override
           public void merge(Object ns, $ROW_DATA $MERGED_ACC_TERM) throws Exception {
-            $namespaceClassName $NAMESPACE_TERM = ($namespaceClassName) ns;
+            $NAMESPACE_TERM = ($namespaceClassName) ns;
             $mergeCode
           }
 
           @Override
           public void setAccumulators(Object ns, $ROW_DATA $ACC_TERM)
           throws Exception {
-            $namespaceClassName $NAMESPACE_TERM = ($namespaceClassName) ns;
+            $NAMESPACE_TERM = ($namespaceClassName) ns;
             $setAccumulatorsCode
           }
 
@@ -734,13 +759,13 @@ class AggsHandlerCodeGenerator(
             $COLLECTOR<$ROW_DATA> $COLLECTOR_TERM) throws Exception {
 
             $MEMBER_COLLECTOR_TERM.$COLLECTOR_TERM = $COLLECTOR_TERM;
-            $namespaceClassName $NAMESPACE_TERM = ($namespaceClassName) ns;
+            $NAMESPACE_TERM = ($namespaceClassName) ns;
             $emitValueCode
           }
 
           @Override
           public void cleanup(Object ns) throws Exception {
-            $namespaceClassName $NAMESPACE_TERM = ($namespaceClassName) ns;
+            $NAMESPACE_TERM = ($namespaceClassName) ns;
             ${ctx.reuseCleanupCode()}
           }
 
@@ -805,7 +830,9 @@ class AggsHandlerCodeGenerator(
       accTypeInfo,
       classOf[GenericRowData],
       outRow = accTerm,
-      reusedOutRow = false)
+      reusedOutRow = false,
+      allowSplit = true,
+      methodName = methodName)
 
     s"""
        |${ctx.reuseLocalVariableCode(methodName)}
@@ -828,7 +855,9 @@ class AggsHandlerCodeGenerator(
       accTypeInfo,
       classOf[GenericRowData],
       outRow = accTerm,
-      reusedOutRow = false)
+      reusedOutRow = false,
+      allowSplit = true,
+      methodName = methodName)
 
     s"""
        |${ctx.reuseLocalVariableCode(methodName)}
@@ -844,7 +873,8 @@ class AggsHandlerCodeGenerator(
     // bind input1 as accumulators
     val exprGenerator = new ExprCodeGenerator(ctx, INPUT_NOT_NULL)
         .bindInput(accTypeInfo, inputTerm = ACC_TERM)
-    val body = aggBufferCodeGens.map(_.setAccumulator(exprGenerator)).mkString("\n")
+    val body = splitExpressionsIfNecessary(
+      aggBufferCodeGens.map(_.setAccumulator(exprGenerator)), methodName)
 
     s"""
        |${ctx.reuseLocalVariableCode(methodName)}
@@ -858,7 +888,8 @@ class AggsHandlerCodeGenerator(
     ctx.startNewLocalVariableStatement(methodName)
 
     val exprGenerator = new ExprCodeGenerator(ctx, INPUT_NOT_NULL)
-    val body = aggBufferCodeGens.map(_.resetAccumulator(exprGenerator)).mkString("\n")
+    val body = splitExpressionsIfNecessary(aggBufferCodeGens.map(_.resetAccumulator(exprGenerator)),
+      methodName)
 
     s"""
        |${ctx.reuseLocalVariableCode(methodName)}
@@ -877,7 +908,8 @@ class AggsHandlerCodeGenerator(
       // bind input1 as inputRow
       val exprGenerator = new ExprCodeGenerator(ctx, INPUT_NOT_NULL)
           .bindInput(inputType, inputTerm = ACCUMULATE_INPUT_TERM)
-      val body = aggActionCodeGens.map(_.accumulate(exprGenerator)).mkString("\n")
+      val body = splitExpressionsIfNecessary(
+        aggActionCodeGens.map(_.accumulate(exprGenerator)), methodName)
       s"""
          |${ctx.reuseLocalVariableCode(methodName)}
          |${ctx.reuseInputUnboxingCode(ACCUMULATE_INPUT_TERM)}
@@ -900,7 +932,8 @@ class AggsHandlerCodeGenerator(
       // bind input1 as inputRow
       val exprGenerator = new ExprCodeGenerator(ctx, INPUT_NOT_NULL)
           .bindInput(inputType, inputTerm = RETRACT_INPUT_TERM)
-      val body = aggActionCodeGens.map(_.retract(exprGenerator)).mkString("\n")
+      val body = splitExpressionsIfNecessary(
+        aggActionCodeGens.map(_.retract(exprGenerator)), methodName)
       s"""
          |${ctx.reuseLocalVariableCode(methodName)}
          |${ctx.reuseInputUnboxingCode(RETRACT_INPUT_TERM)}
@@ -934,7 +967,8 @@ class AggsHandlerCodeGenerator(
       // bind input1 as otherAcc
       val exprGenerator = new ExprCodeGenerator(ctx, INPUT_NOT_NULL)
           .bindInput(mergedAccType, inputTerm = MERGED_ACC_TERM)
-      val body = aggActionCodeGens.map(_.merge(exprGenerator)).mkString("\n")
+      val body = splitExpressionsIfNecessary(
+        aggActionCodeGens.map(_.merge(exprGenerator)), methodName)
       s"""
          |${ctx.reuseLocalVariableCode(methodName)}
          |${ctx.reuseInputUnboxingCode(MERGED_ACC_TERM)}
@@ -943,6 +977,27 @@ class AggsHandlerCodeGenerator(
     } else {
       genThrowException(
         "This function not require merge method, but the merge method is called.")
+    }
+  }
+
+  private def splitExpressionsIfNecessary(exprs: Array[String], methodName: String): String = {
+    val totalLen = exprs.map(_.length).sum
+    val maxCodeLength = ctx.tableConfig.getMaxGeneratedCodeLength
+    if (totalLen > maxCodeLength) {
+      ctx.setCodeSplit(methodName)
+      exprs.map(expr => {
+        val splitMethodName = newName("split_" + methodName)
+        val method =
+          s"""
+             |private void $splitMethodName() throws Exception {
+             |  $expr
+             |}
+             |""".stripMargin
+        ctx.addReusableMember(method)
+        s"$splitMethodName();"
+      }).mkString("\n")
+    } else {
+      exprs.mkString("\n")
     }
   }
 
@@ -1005,7 +1060,9 @@ class AggsHandlerCodeGenerator(
       valueType,
       classOf[GenericRowData],
       outRow = aggValueTerm,
-      reusedOutRow = false)
+      reusedOutRow = false,
+      allowSplit = true,
+      methodName = methodName)
 
     s"""
        |${ctx.reuseLocalVariableCode(methodName)}
@@ -1051,14 +1108,14 @@ class AggsHandlerCodeGenerator(
 
   private def genRecordToRowData(aggExternalType: DataType, recordInputName: String): String = {
     val resultType = fromDataTypeToLogicalType(aggExternalType)
-    val resultRowType = PlannerTypeUtils.toRowType(resultType)
+    val resultRowType = LogicalTypeUtils.toRowType(resultType)
 
     val newCtx = CodeGeneratorContext(ctx.tableConfig)
     val exprGenerator = new ExprCodeGenerator(newCtx, false).bindInput(resultType)
     val resultExpr = exprGenerator.generateConverterResultExpression(
       resultRowType, classOf[GenericRowData], "convertResult")
 
-    val converterCode = CodeGenUtils.genToInternal(ctx, aggExternalType, recordInputName)
+    val converterCode = CodeGenUtils.genToInternalConverter(ctx, aggExternalType, recordInputName)
     val resultTypeClass = boxedTypeTermForType(resultType)
     s"""
        |${newCtx.reuseMemberCode()}
@@ -1164,7 +1221,7 @@ object AggsHandlerCodeGenerator {
       val openCode =
         s"""
            |$viewFieldTerm = ($viewTypeTerm) $STORE_TERM.$registerCall($parameters);
-           |$viewFieldInternalTerm = ${genToInternal(
+           |$viewFieldInternalTerm = ${genToInternalConverter(
                 ctx, fromLegacyInfoToDataType(spec.dataViewTypeInfo), viewFieldTerm)};
          """.stripMargin
       ctx.addReusableOpenStatement(openCode)
@@ -1192,7 +1249,7 @@ object AggsHandlerCodeGenerator {
         val backupOpenCode =
           s"""
              |$backupViewTerm = ($viewTypeTerm) $STORE_TERM.$registerCall($parameters);
-             |$backupViewInternalTerm = ${genToInternal(
+             |$backupViewInternalTerm = ${genToInternalConverter(
                 ctx, fromLegacyInfoToDataType(spec.dataViewTypeInfo), backupViewTerm)};
            """.stripMargin
         ctx.addReusableOpenStatement(backupOpenCode)
